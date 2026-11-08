@@ -1,0 +1,447 @@
+# -*- coding: utf-8 -*-
+"""Modify Video —— 本地视频剪辑工具（FFmpeg 后端）"""
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+import webbrowser
+
+from flask import Flask, jsonify, request, send_file, send_from_directory
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+BIN_DIR = os.path.join(BASE_DIR, "bin")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+VIDEO_EXTS = {
+    ".mp4", ".m4v", ".webm", ".mov", ".mkv", ".avi", ".flv",
+    ".ts", ".wmv", ".mpg", ".mpeg", ".3gp", ".gif",
+}
+EXPORT_FORMATS = {"mp4", "webm", "gif", "mkv", "avi", "mov"}
+
+MIMETYPES = {
+    ".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm",
+    ".mov": "video/quicktime", ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",
+    ".gif": "image/gif", ".flv": "video/x-flv", ".ts": "video/mp2t",
+    ".wmv": "video/x-ms-wmv", ".mpg": "video/mpeg", ".mpeg": "video/mpeg",
+    ".3gp": "video/3gpp",
+}
+
+# 输出格式 -> ffprobe format_name 的成员，用于判断能否流复制（免转码快速导出）
+CONTAINER_KEYS = {
+    "mp4": {"mp4", "m4a", "m4v", "3gp", "3g2", "mj2"},
+    "mov": {"mov", "mp4", "m4a", "3gp", "3g2", "mj2"},
+    "webm": {"webm"},
+    "mkv": {"matroska"},
+    "avi": {"avi"},
+    "gif": {"gif"},
+}
+
+
+def find_tool(name):
+    found = shutil.which(name)
+    if found:
+        return found
+    local = os.path.join(BIN_DIR, name + ".exe")
+    return local if os.path.isfile(local) else None
+
+
+FFMPEG = find_tool("ffmpeg")
+FFPROBE = find_tool("ffprobe")
+CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+app = Flask(__name__, static_folder="static", static_url_path="/static")
+app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 ** 3
+try:
+    app.json.ensure_ascii = False
+except Exception:
+    app.config["JSON_AS_ASCII"] = False
+
+job = {"running": False, "progress": 0.0, "message": "", "output": "", "error": "", "cancel": False, "proc": None}
+job_lock = threading.Lock()
+last_dir = {"path": os.path.expanduser("~")}
+
+_encoder_cache = {}
+
+
+def has_encoder(name):
+    if name not in _encoder_cache:
+        r = subprocess.run([FFMPEG, "-hide_banner", "-encoders"], capture_output=True,
+                           encoding="utf-8", errors="replace", creationflags=CREATE_NO_WINDOW)
+        _encoder_cache[name] = name in (r.stdout or "")
+    return _encoder_cache[name]
+
+
+def probe(path):
+    cmd = [FFPROBE, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path]
+    r = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace",
+                       creationflags=CREATE_NO_WINDOW)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or "ffprobe 解析失败").strip()[-300:])
+    data = json.loads(r.stdout)
+    fmt = data.get("format", {})
+    width = height = 0
+    has_audio = False
+    for s in data.get("streams", []):
+        if s.get("codec_type") == "video" and not width:
+            width = s.get("width") or 0
+            height = s.get("height") or 0
+        elif s.get("codec_type") == "audio":
+            has_audio = True
+    return {
+        "path": path,
+        "name": os.path.basename(path),
+        "dir": os.path.dirname(path),
+        "size": os.path.getsize(path),
+        "duration": float(fmt.get("duration") or 0),
+        "width": width,
+        "height": height,
+        "hasAudio": has_audio,
+        "formatName": fmt.get("format_name", ""),
+    }
+
+
+def media_info(path):
+    if not path or not os.path.isfile(path):
+        return None
+    if os.path.splitext(path)[1].lower() not in VIDEO_EXTS:
+        return None
+    try:
+        return probe(path)
+    except Exception:
+        return None
+
+
+def atempo_chain(speed):
+    """atempo 单级只支持 0.5~2.0，超出范围时级联多级"""
+    parts = []
+    x = float(speed)
+    while x > 2.0:
+        parts.append(2.0)
+        x /= 2.0
+    while x < 0.5:
+        parts.append(0.5)
+        x *= 2.0
+    parts.append(round(x, 4))
+    return ",".join(f"atempo={p:g}" for p in parts)
+
+
+def video_codec_args(fmt):
+    if fmt in ("mp4", "mov", "mkv"):
+        args = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k"]
+        if fmt == "mp4":
+            args += ["-movflags", "+faststart"]
+        return args
+    if fmt == "webm":
+        audio = "libopus" if has_encoder("libopus") else "libvorbis"
+        return ["-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0",
+                "-deadline", "good", "-cpu-used", "4", "-c:a", audio, "-b:a", "128k"]
+    if fmt == "avi":
+        audio = "libmp3lame" if has_encoder("libmp3lame") else "aac"
+        return ["-c:v", "mpeg4", "-qscale:v", "5", "-c:a", audio, "-b:a", "160k"]
+    return []
+
+
+def unique_output_path(src, fmt):
+    stem = os.path.splitext(os.path.basename(src))[0]
+    directory = os.path.dirname(src)
+    candidate = os.path.join(directory, f"{stem}_edited.{fmt}")
+    n = 2
+    while os.path.exists(candidate):
+        candidate = os.path.join(directory, f"{stem}_edited_{n}.{fmt}")
+        n += 1
+    return candidate
+
+
+def build_command(cfg):
+    src, fmt, out = cfg["path"], cfg["format"], cfg["output"]
+    start, speed, mute = cfg["start"], cfg["speed"], cfg["mute"]
+    end = cfg.get("end")
+
+    # -ss/-t 必须位于 -i 之前（输入端裁剪）；FFmpeg 7+ 输出端 -t 会在滤镜前截断，
+    # 导致 setpts 变速后时长不正确
+    cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1"]
+    if start > 0:
+        cmd += ["-ss", f"{start:.3f}"]
+    if end is not None:
+        cmd += ["-t", f"{max(0.05, end - start):.3f}"]
+    cmd += ["-i", src]
+
+    if fmt == "gif":
+        fps = max(1, int(cfg.get("gifFps") or 12))
+        width = int(cfg.get("gifWidth") or 0)
+        chain = []
+        if speed != 1:
+            chain.append(f"setpts=PTS/{speed:g}")
+        chain.append(f"fps={fps}")
+        if width > 0:
+            chain.append(f"scale={width}:-2:flags=lanczos")
+        fc = f"[0:v]{','.join(chain)},split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse"
+        cmd += ["-filter_complex", fc, "-an", out]
+        return cmd
+
+    src_keys = set((cfg.get("srcFormat") or "").split(","))
+    same_container = bool(CONTAINER_KEYS.get(fmt, set()) & src_keys)
+    if speed == 1 and not mute and same_container:
+        if end is not None:
+            cmd += ["-t", f"{max(0.05, end - start):.3f}"]
+        cmd += ["-c", "copy", out]
+        return cmd
+
+    vf, af = [], []
+    if speed != 1:
+        vf.append(f"setpts=PTS/{speed:g}")
+        af.append(atempo_chain(speed))
+    if vf:
+        cmd += ["-vf", ",".join(vf)]
+    if mute:
+        cmd += ["-an"]
+    elif af:
+        cmd += ["-af", ",".join(af)]
+    cmd += video_codec_args(fmt) + [out]
+    return cmd
+
+
+def run_export(cfg):
+    proc = None
+    try:
+        proc = subprocess.Popen(build_command(cfg), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8", errors="replace",
+                                creationflags=CREATE_NO_WINDOW)
+        with job_lock:
+            job["proc"] = proc
+        total = max(0.01, cfg["total"])
+        for line in proc.stdout:
+            line = line.strip()
+            if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
+                try:
+                    us = float(line.split("=", 1)[1])
+                except ValueError:
+                    continue
+                with job_lock:
+                    job["progress"] = min(99.0, us / 1e6 / total * 100.0)
+        err = (proc.stderr.read() or "").strip()
+        code = proc.wait()
+        with job_lock:
+            job["proc"] = None
+            job["running"] = False
+            if job["cancel"]:
+                job["message"] = "已取消"
+            elif code == 0 and os.path.isfile(cfg["output"]):
+                job["progress"] = 100.0
+                job["message"] = "完成"
+                job["output"] = cfg["output"]
+            else:
+                job["error"] = (err.splitlines()[-1][:400] if err else f"ffmpeg 退出码 {code}")
+    except Exception as e:
+        with job_lock:
+            job.update(running=False, proc=None, error=str(e))
+
+
+@app.get("/")
+def index():
+    return send_from_directory(app.static_folder, "index.html")
+
+
+@app.get("/api/env")
+def api_env():
+    ok = bool(FFMPEG and os.path.isfile(FFMPEG))
+    version = ""
+    if ok:
+        r = subprocess.run([FFMPEG, "-version"], capture_output=True, encoding="utf-8",
+                           errors="replace", creationflags=CREATE_NO_WINDOW)
+        version = (r.stdout or "").splitlines()[0] if r.stdout else ""
+    return jsonify({"ffmpeg": ok, "version": version})
+
+
+@app.post("/api/pick")
+def api_pick():
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = filedialog.askopenfilename(
+            title="选择视频文件",
+            initialdir=last_dir["path"],
+            filetypes=[("视频文件", "*.mp4 *.m4v *.webm *.mov *.mkv *.avi *.flv *.ts *.wmv *.mpg *.mpeg *.3gp *.gif"),
+                       ("所有文件", "*.*")],
+        )
+        root.destroy()
+    except Exception as e:
+        return jsonify({"error": f"无法打开文件对话框：{e}"}), 500
+    if not path:
+        return jsonify({"path": None})
+    info = media_info(path)
+    if not info:
+        return jsonify({"error": "请选择支持的视频文件"}), 400
+    last_dir["path"] = info["dir"]
+    return jsonify({"path": path, "info": info})
+
+
+@app.post("/api/load")
+def api_load():
+    body = request.get_json(silent=True) or {}
+    path = (body.get("path") or "").strip().strip('"')
+    info = media_info(path)
+    if not info:
+        return jsonify({"error": "文件不存在或格式不支持"}), 400
+    last_dir["path"] = info["dir"]
+    return jsonify({"path": path, "info": info})
+
+
+@app.post("/api/upload")
+def api_upload():
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"error": "未收到文件"}), 400
+    name = os.path.basename(f.filename.replace("\\", "/"))
+    stem, ext = os.path.splitext(name)
+    stem = re.sub(r'[\\/:*?"<>|]', "_", stem) or "video"
+    ext = ext.lower()
+    if ext not in VIDEO_EXTS:
+        return jsonify({"error": f"不支持的格式：{ext or '未知'}"}), 400
+    dest = os.path.join(UPLOAD_DIR, stem + ext)
+    n = 2
+    while os.path.exists(dest):
+        dest = os.path.join(UPLOAD_DIR, f"{stem}_{n}{ext}")
+        n += 1
+    f.save(dest)
+    try:
+        info = probe(dest)
+    except Exception as e:
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        return jsonify({"error": f"无法解析该文件：{e}"}), 400
+    return jsonify({"path": dest, "info": info})
+
+
+@app.get("/media")
+def media():
+    path = request.args.get("path", "")
+    ext = os.path.splitext(path)[1].lower()
+    if not os.path.isfile(path) or ext not in VIDEO_EXTS:
+        return "not found", 404
+    resp = send_file(path, mimetype=MIMETYPES.get(ext, "application/octet-stream"), conditional=True)
+    resp.headers["Accept-Ranges"] = "bytes"
+    return resp
+
+
+@app.post("/api/export")
+def api_export():
+    with job_lock:
+        if job["running"]:
+            return jsonify({"error": "已有导出任务正在进行，请先等待完成或取消"}), 409
+    body = request.get_json(silent=True) or {}
+    path = (body.get("path") or "").strip()
+    info = media_info(path)
+    if not info:
+        return jsonify({"error": "源文件无效"}), 400
+    fmt = body.get("format") or "mp4"
+    if fmt not in EXPORT_FORMATS:
+        return jsonify({"error": f"不支持的输出格式：{fmt}"}), 400
+    try:
+        start = max(0.0, float(body.get("start") or 0))
+        speed = float(body.get("speed") or 1)
+        end = body.get("end")
+        end = None if end in (None, "") else float(end)
+    except (TypeError, ValueError):
+        return jsonify({"error": "参数错误"}), 400
+    if speed <= 0:
+        return jsonify({"error": "速度必须大于 0"}), 400
+    duration = info["duration"] or 0
+    if duration and end is not None:
+        end = min(end, duration)
+    if end is not None and end - start < 0.05:
+        return jsonify({"error": "所选时间范围太短"}), 400
+
+    total_span = (end - start) if end is not None else max(0.05, duration - start)
+    cfg = {
+        "path": path, "start": start, "end": end, "speed": speed, "format": fmt,
+        "mute": bool(body.get("mute")),
+        "gifFps": body.get("gifFps"), "gifWidth": body.get("gifWidth"),
+        "srcFormat": info["formatName"],
+        "output": unique_output_path(path, fmt),
+        "total": max(0.01, total_span / speed),
+    }
+    with job_lock:
+        job.update(running=True, progress=0.0, message="正在处理…", output="", error="", cancel=False)
+    threading.Thread(target=run_export, args=(cfg,), daemon=True).start()
+    return jsonify({"ok": True, "output": cfg["output"]})
+
+
+@app.get("/api/status")
+def api_status():
+    with job_lock:
+        return jsonify({
+            "running": job["running"],
+            "progress": round(job["progress"], 1),
+            "message": job["message"],
+            "output": job["output"],
+            "error": job["error"],
+        })
+
+
+@app.post("/api/cancel")
+def api_cancel():
+    with job_lock:
+        job["cancel"] = True
+        proc = job.get("proc")
+    if proc:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    return jsonify({"ok": True})
+
+
+@app.post("/api/reveal")
+def api_reveal():
+    path = (request.get_json(silent=True) or {}).get("path", "")
+    if not os.path.isfile(path):
+        return jsonify({"error": "文件不存在"}), 404
+    if os.name == "nt":
+        subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+    else:
+        subprocess.Popen(["xdg-open", os.path.dirname(path)])
+    return jsonify({"ok": True})
+
+
+def find_free_port(preferred=8765):
+    for p in (preferred, 0):
+        s = socket.socket()
+        try:
+            s.bind(("127.0.0.1", p))
+            return s.getsockname()[1]
+        except OSError:
+            continue
+        finally:
+            s.close()
+    return preferred
+
+
+if __name__ == "__main__":
+    if not (FFMPEG and os.path.isfile(FFMPEG)):
+        print("[X] 未找到 FFmpeg，请先安装：winget install Gyan.FFmpeg")
+        print("    或将 ffmpeg.exe / ffprobe.exe 放到 bin\\ 目录后重新运行。")
+        input("按回车键退出…")
+        sys.exit(1)
+    if not (FFPROBE and os.path.isfile(FFPROBE)):
+        print("[X] 未找到 ffprobe，请将 ffprobe.exe 与 ffmpeg.exe 放在同一目录。")
+        input("按回车键退出…")
+        sys.exit(1)
+
+    port = find_free_port()
+    url = f"http://127.0.0.1:{port}"
+    print(f"Modify Video 运行中：{url}（关闭本窗口即退出）")
+    if not os.environ.get("VIDEOCHANGE_NO_BROWSER"):
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
