@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Modify Video —— 本地视频剪辑工具（FFmpeg 后端）"""
+import base64
 import json
 import os
 import platform as platform_mod
@@ -9,6 +10,7 @@ import socket
 import subprocess
 import sys
 import tarfile
+import tempfile
 import threading
 import urllib.request
 import webbrowser
@@ -205,15 +207,43 @@ def probe(path):
     }
 
 
-def media_info(path):
+def make_thumb(path, duration):
+    """抽取 12 帧拼成胶片条，返回 data URL；失败返回 None"""
+    if not duration:
+        return None
+    n = 12
+    fd, tmp = tempfile.mkstemp(suffix=".jpg")
+    os.close(fd)
+    try:
+        cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-i", path,
+               "-vf", f"fps={n}/{duration:.3f},scale=160:-2,tile={n}x1",
+               "-frames:v", "1", "-q:v", "5", tmp]
+        subprocess.run(cmd, capture_output=True, creationflags=CREATE_NO_WINDOW, timeout=60)
+        if os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
+            with open(tmp, "rb") as f:
+                return "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
+    except Exception:
+        pass
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    return None
+
+
+def media_info(path, with_thumb=False):
     if not path or not os.path.isfile(path):
         return None
     if os.path.splitext(path)[1].lower() not in VIDEO_EXTS:
         return None
     try:
-        return probe(path)
+        info = probe(path)
     except Exception:
         return None
+    if with_thumb:
+        info["thumb"] = make_thumb(path, info["duration"])
+    return info
 
 
 def atempo_chain(speed):
@@ -378,7 +408,7 @@ def api_pick():
         return jsonify({"error": f"无法打开文件对话框：{e}"}), 500
     if not path:
         return jsonify({"path": None})
-    info = media_info(path)
+    info = media_info(path, with_thumb=True)
     if not info:
         return jsonify({"error": "请选择支持的视频文件"}), 400
     last_dir["path"] = info["dir"]
@@ -389,7 +419,7 @@ def api_pick():
 def api_load():
     body = request.get_json(silent=True) or {}
     path = (body.get("path") or "").strip().strip('"')
-    info = media_info(path)
+    info = media_info(path, with_thumb=True)
     if not info:
         return jsonify({"error": "文件不存在或格式不支持"}), 400
     last_dir["path"] = info["dir"]
@@ -415,6 +445,7 @@ def api_upload():
     f.save(dest)
     try:
         info = probe(dest)
+        info["thumb"] = make_thumb(dest, info["duration"])
     except Exception as e:
         try:
             os.remove(dest)

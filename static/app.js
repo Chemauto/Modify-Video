@@ -8,7 +8,7 @@ const el = {
   btnPick: $("#btnPick"), btnLoad: $("#btnLoad"), pathInput: $("#pathInput"),
   video: $("#video"), meta: $("#meta"),
   tl: $("#tl"), sel: $("#sel"), dimL: $("#dimL"), dimR: $("#dimR"),
-  hA: $("#hA"), hB: $("#hB"), ph: $("#ph"),
+  hA: $("#hA"), hB: $("#hB"), ph: $("#ph"), ruler: $("#ruler"), film: $("#film"),
   tA: $("#tA"), tB: $("#tB"), tCur: $("#tCur"), selLabel: $("#selLabel"),
   btnPlay: $("#btnPlay"), icPlay: $("#icPlay"), icPause: $("#icPause"), playLabel: $("#playLabel"),
   btnSetIn: $("#btnSetIn"), btnSetOut: $("#btnSetOut"), btnReset: $("#btnReset"),
@@ -93,6 +93,13 @@ function setFile(path, info) {
   el.btnExport.disabled = false;
 
   el.video.src = "/media?path=" + encodeURIComponent(path);
+  if (info.thumb) {
+    el.film.style.backgroundImage = `url("${info.thumb}")`;
+    el.film.classList.remove("no-thumb");
+  } else {
+    el.film.style.backgroundImage = "";
+    el.film.classList.add("no-thumb");
+  }
   el.meta.textContent =
     `${info.name} · ${info.width || "?"}×${info.height || "?"} · ${fmtSize(info.size)}` +
     (info.hasAudio ? "" : " · 无音轨");
@@ -191,6 +198,7 @@ el.video.addEventListener("loadedmetadata", () => {
   state.selB = d;
   el.video.playbackRate = state.speed;
   renderTL();
+  renderRuler();
   updateSelLabel();
 });
 el.video.addEventListener("timeupdate", () => {
@@ -214,6 +222,35 @@ function setPlayIcon(playing) {
 }
 
 function pct(t) { return state.duration ? (t / state.duration) * 100 : 0; }
+
+function fmtRuler(t) {
+  t = Math.round(t * 10) / 10;
+  const m = Math.floor(t / 60);
+  const s = t - m * 60;
+  if (m > 0) return `${m}:${String(Math.round(s)).padStart(2, "0")}`;
+  return Number.isInteger(s) ? `${s}s` : `${s.toFixed(1)}s`;
+}
+
+function renderRuler() {
+  el.ruler.innerHTML = "";
+  const dur = state.duration;
+  if (!dur) return;
+  const steps = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800];
+  const step = steps.find((s) => dur / s <= 8) || 3600;
+  for (let t = 0; t <= dur + 1e-6; t += step) {
+    const pos = pct(t);
+    const tick = document.createElement("div");
+    tick.className = "tl-tick";
+    tick.style.left = pos + "%";
+    const lab = document.createElement("span");
+    lab.className = "tl-tick-label";
+    lab.textContent = fmtRuler(t);
+    if (pos < 2) lab.style.transform = "translateX(0)";
+    else if (pos > 98) lab.style.transform = "translateX(-100%)";
+    tick.appendChild(lab);
+    el.ruler.appendChild(tick);
+  }
+}
 
 function renderTL() {
   const a = pct(state.selA), b = pct(state.selB);
