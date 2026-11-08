@@ -4,6 +4,8 @@
 
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Ubuntu-blue) ![python](https://img.shields.io/badge/python-3.8%2B-green)
 
+![Modify Video 操作演示](docs/demo.gif)
+
 ## 功能
 
 - **视频剪辑**：可视化时间轴拖动选段（带胶片条预览与时间刻度），精确到 0.1 秒裁剪任意片段
