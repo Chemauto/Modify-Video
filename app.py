@@ -18,9 +18,28 @@ import zipfile
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-BIN_DIR = os.path.join(BASE_DIR, "bin")
+# PyInstaller 打包后 __file__ 指向临时解包目录，可写数据须放在 EXE 旁边；
+# deb 等系统级安装时 BASE_DIR 只读，数据目录回退到 XDG 数据目录
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+    STATIC_DIR = os.path.join(getattr(sys, "_MEIPASS", BASE_DIR), "static")
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    STATIC_DIR = os.path.join(BASE_DIR, "static")
+
+
+def _data_dir():
+    if os.access(BASE_DIR, os.W_OK):
+        return BASE_DIR
+    root = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    path = os.path.join(root, "modify-video")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+DATA_DIR = _data_dir()
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+BIN_DIR = os.path.join(DATA_DIR, "bin")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 VIDEO_EXTS = {
@@ -49,7 +68,7 @@ CONTAINER_KEYS = {
 
 
 # FFmpeg 自动下载：优先使用本项目 Releases 中的资源包，失败时回退到官方上游构建
-RELEASE_BASE = "https://github.com/Chemauto/Modify-Video/releases/download/v1.0.0/"
+RELEASE_BASE = "https://github.com/Chemauto/Modify-Video/releases/download/v1.0.1/"
 PLATFORM_ASSETS = {
     ("windows", "amd64"): ("ffmpeg-win64.zip",
                            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"),

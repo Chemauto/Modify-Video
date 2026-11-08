@@ -5,3 +5,7 @@ bin/
 .venv/
 venv/
 .DS_Store
+dist/
+build/
+installer/
+*.spec
