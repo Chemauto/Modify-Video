@@ -2,13 +2,17 @@
 """Modify Video —— 本地视频剪辑工具（FFmpeg 后端）"""
 import json
 import os
+import platform as platform_mod
 import re
 import shutil
 import socket
 import subprocess
 import sys
+import tarfile
 import threading
+import urllib.request
 import webbrowser
+import zipfile
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
 
@@ -42,17 +46,113 @@ CONTAINER_KEYS = {
 }
 
 
+# FFmpeg 自动下载：优先使用本项目 Releases 中的资源包，失败时回退到官方上游构建
+RELEASE_BASE = "https://github.com/Chemauto/Modify-Video/releases/download/v1.0.0/"
+PLATFORM_ASSETS = {
+    ("windows", "amd64"): ("ffmpeg-win64.zip",
+                           "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"),
+    ("linux", "amd64"): ("ffmpeg-linux64.tar.xz",
+                         "https://www.johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"),
+}
+
+
 def find_tool(name):
     found = shutil.which(name)
     if found:
         return found
-    local = os.path.join(BIN_DIR, name + ".exe")
+    exe = name + (".exe" if os.name == "nt" else "")
+    local = os.path.join(BIN_DIR, exe)
     return local if os.path.isfile(local) else None
 
 
 FFMPEG = find_tool("ffmpeg")
 FFPROBE = find_tool("ffprobe")
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+
+def platform_key():
+    system = sys.platform
+    machine = (platform_mod.machine() or "").lower()
+    if system.startswith("win") and machine in ("amd64", "x86_64"):
+        return ("windows", "amd64")
+    if system.startswith("linux") and machine in ("amd64", "x86_64"):
+        return ("linux", "amd64")
+    return None
+
+
+def download_with_progress(url, dest):
+    print(f"正在下载 FFmpeg：{url}")
+    req = urllib.request.Request(url, headers={"User-Agent": "ModifyVideo/1.0"})
+    with urllib.request.urlopen(req, timeout=60) as r, open(dest, "wb") as f:
+        total = int(r.headers.get("Content-Length") or 0)
+        done = 0
+        while True:
+            chunk = r.read(256 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
+            done += len(chunk)
+            if total:
+                print(f"\r下载进度 {done * 100 // total}% ({done // 1048576}/{total // 1048576} MB)", end="", flush=True)
+    print()
+
+
+def extract_tools(archive, dest_dir):
+    """从 zip / tar 包中提取 ffmpeg 与 ffprobe 到 dest_dir，兼容包内任意层级"""
+    names = {"ffmpeg", "ffprobe"}
+    suffix = ".exe" if os.name == "nt" else ""
+    found = {}
+    with open(archive, "rb") as f:
+        is_zip = f.read(2) == b"PK"
+    opener = zipfile.ZipFile(archive) if is_zip else tarfile.open(archive)
+    with opener:
+        members = (opener.infolist() if hasattr(opener, "infolist") else opener.getmembers())
+        for m in members:
+            base = os.path.basename(m.filename if hasattr(m, "filename") else m.name)
+            stem, ext = os.path.splitext(base)
+            if stem in names and ext.lower() in ("", ".exe") and stem not in found:
+                is_file = m.file_size > 0 if hasattr(m, "file_size") else m.isfile()
+                if not is_file:
+                    continue
+                target = os.path.join(dest_dir, stem + suffix)
+                if is_zip:
+                    src = opener.open(m)
+                else:
+                    src = opener.extractfile(m)
+                with src, open(target, "wb") as out:
+                    shutil.copyfileobj(src, out)
+                if suffix == "":
+                    os.chmod(target, 0o755)
+                found[stem] = target
+    return found
+
+
+def ensure_tools():
+    """定位 ffmpeg/ffprobe；缺失时从 Releases 下载到 bin/ 目录"""
+    global FFMPEG, FFPROBE
+    FFMPEG, FFPROBE = find_tool("ffmpeg"), find_tool("ffprobe")
+    if FFMPEG and FFPROBE:
+        return True
+    key = platform_key()
+    if key is None:
+        print(f"[X] 暂不支持的平台：{sys.platform} / {platform_mod.machine()}")
+        return False
+    asset, upstream = PLATFORM_ASSETS[key]
+    os.makedirs(BIN_DIR, exist_ok=True)
+    tmp = os.path.join(BIN_DIR, "_ffmpeg_download.tmp")
+    for url in (RELEASE_BASE + asset, upstream):
+        try:
+            download_with_progress(url, tmp)
+            found = extract_tools(tmp, BIN_DIR)
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            if "ffmpeg" in found and "ffprobe" in found:
+                FFMPEG, FFPROBE = find_tool("ffmpeg"), find_tool("ffprobe")
+                if FFMPEG and FFPROBE:
+                    return True
+        except Exception as e:
+            print(f"下载失败：{e}")
+    return False
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 ** 3
@@ -429,14 +529,13 @@ def find_free_port(preferred=8765):
 
 
 if __name__ == "__main__":
-    if not (FFMPEG and os.path.isfile(FFMPEG)):
-        print("[X] 未找到 FFmpeg，请先安装：winget install Gyan.FFmpeg")
-        print("    或将 ffmpeg.exe / ffprobe.exe 放到 bin\\ 目录后重新运行。")
-        input("按回车键退出…")
-        sys.exit(1)
-    if not (FFPROBE and os.path.isfile(FFPROBE)):
-        print("[X] 未找到 ffprobe，请将 ffprobe.exe 与 ffmpeg.exe 放在同一目录。")
-        input("按回车键退出…")
+    if not ensure_tools():
+        print("[X] FFmpeg 未找到且自动下载失败，请手动安装后重新运行：")
+        print("    Windows: winget install Gyan.FFmpeg")
+        print("    Ubuntu:  sudo apt install ffmpeg")
+        print("    或将 ffmpeg / ffprobe 可执行文件放到 bin\\ 目录下。")
+        if os.name == "nt":
+            input("按回车键退出…")
         sys.exit(1)
 
     port = find_free_port()

@@ -23,15 +23,5 @@ if errorlevel 1 (
     )
 )
 
-if not exist "bin\ffmpeg.exe" if not exist "bin\ffprobe.exe" (
-    where ffmpeg >nul 2>nul
-    if errorlevel 1 (
-        echo [!] FFmpeg not found. Install it with: winget install Gyan.FFmpeg
-        echo     Or put ffmpeg.exe / ffprobe.exe into the bin\ folder.
-        pause
-        exit /b 1
-    )
-)
-
 python app.py
 pause

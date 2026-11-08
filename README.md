@@ -1,6 +1,6 @@
 # Modify Video — 本地视频剪辑工具
 
-基于 FFmpeg 的桌面视频编辑工具，内置精美的网页操作界面，双击即可启动，无需安装任何额外软件。
+基于 FFmpeg 的桌面视频编辑工具，内置精美的网页操作界面，双击即可启动。支持 Windows 与 Linux（Ubuntu）。
 
 ## 功能
 
@@ -12,12 +12,14 @@
 
 ## 快速开始
 
-1. 安装 [Python 3.8+](https://www.python.org)（安装时勾选 **Add python.exe to PATH**）
-2. 双击 **一键启动.bat**
-   - 首次运行会自动安装 Flask（唯一的 Python 依赖）
-   - 启动后自动打开浏览器界面，关闭命令行窗口即退出
+只需安装 [Python 3.8+](https://www.python.org)（Windows 安装时勾选 **Add python.exe to PATH**），FFmpeg 首次运行时会自动从本项目 [Releases](https://github.com/Chemauto/Modify-Video/releases) 下载对应平台的版本到 `bin\` 目录；若系统已安装 FFmpeg 则直接使用，不重复下载。
 
-FFmpeg 无需单独安装：项目已内置便携版于 `bin\` 目录。若该目录为空，也可将系统已装的 ffmpeg.exe / ffprobe.exe 放入 `bin\`，或通过 `winget install Gyan.FFmpeg` 安装后自动识别。
+- **Windows**：双击 **一键启动.bat**
+- **Ubuntu / Debian**：终端执行 `./一键启动.sh`（首次运行自动安装 Flask；若想使用文件选择对话框需 `sudo apt install python3-tk`，拖拽与粘贴路径不受影响）
+
+启动后自动打开浏览器界面，关闭命令行窗口即退出。
+
+也可手动安装 FFmpeg 后运行：Windows 执行 `winget install Gyan.FFmpeg`，Ubuntu 执行 `sudo apt install ffmpeg`。
 
 ## 使用说明
 
@@ -33,4 +35,4 @@ FFmpeg 无需单独安装：项目已内置便携版于 `bin\` 目录。若该�
 - 后端：Python + Flask，通过子进程调用 FFmpeg / FFprobe
 - 界面：原生 HTML / CSS / JS，暗色玻璃拟态风格
 - 仅监听 127.0.0.1，所有处理均在本机完成，不会上传任何数据
-- `uploads\` 目录仅存放拖拽载入的文件副本，可随时清空
+- `bin\` 存放自动下载的 FFmpeg，`uploads\` 仅存放拖拽载入的文件副本，均可随时清空
