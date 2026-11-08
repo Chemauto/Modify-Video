@@ -119,7 +119,11 @@ el.btnPick.addEventListener("click", async () => {
   try {
     const r = await fetch("/api/pick", { method: "POST" });
     const j = await r.json();
-    if (j.error) return toast(j.error, true);
+    if (j.error) {
+      toast(j.error, true);
+      el.pathInput.focus();
+      return;
+    }
     if (j.path) setFile(j.path, j.info);
   } catch (e) {
     toast(e.message, true);

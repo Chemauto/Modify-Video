@@ -408,36 +408,10 @@ def api_env():
     return jsonify({"ffmpeg": ok, "version": version})
 
 
-@app.post("/api/pick")
-def api_pick():
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        path = filedialog.askopenfilename(
-            title="选择视频文件",
-            initialdir=last_dir["path"],
-            filetypes=[("视频文件", "*.mp4 *.m4v *.webm *.mov *.mkv *.avi *.flv *.ts *.wmv *.mpg *.mpeg *.3gp *.gif"),
-                       ("所有文件", "*.*")],
-        )
-        root.destroy()
-    except Exception as e:
-        return jsonify({"error": f"无法打开文件对话框：{e}"}), 500
-    if not path:
-        return jsonify({"path": None})
-    info = media_info(path, with_thumb=True)
-    if not info:
-        return jsonify({"error": "请选择支持的视频文件"}), 400
-    last_dir["path"] = info["dir"]
-    return jsonify({"path": path, "info": info})
-
-
 @app.post("/api/load")
 def api_load():
     body = request.get_json(silent=True) or {}
-    path = (body.get("path") or "").strip().strip('"')
+    path = maybe_wsl_path((body.get("path") or "").strip().strip('"'))
     info = media_info(path, with_thumb=True)
     if not info:
         return jsonify({"error": "文件不存在或格式不支持"}), 400
@@ -559,6 +533,91 @@ def is_wsl():
             return "microsoft" in f.read().lower()
     except OSError:
         return False
+
+
+def maybe_wsl_path(path):
+    r"""WSL 中粘贴的 Windows 路径（X:\...）自动转换为 /mnt/x/..."""
+    if not is_wsl():
+        return path
+    m = re.match(r"^([A-Za-z]):[\\/](.*)$", path.strip())
+    if m:
+        drive = m.group(1).lower()
+        rest = m.group(2).replace("\\", "/")
+        return f"/mnt/{drive}/{rest}"
+    return path
+
+
+VIDEO_FILEFILTER = "视频文件|*.mp4 *.m4v *.webm *.mov *.mkv *.avi *.flv *.ts *.wmv *.mpg *.mpeg *.3gp *.gif"
+
+
+def _pick_tkinter():
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ImportError:
+        return "unavailable", None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = filedialog.askopenfilename(
+            title="选择视频文件",
+            initialdir=last_dir["path"],
+            filetypes=[("视频文件", "*.mp4 *.m4v *.webm *.mov *.mkv *.avi *.flv *.ts *.wmv *.mpg *.mpeg *.3gp *.gif"),
+                       ("所有文件", "*.*")],
+        )
+        root.destroy()
+    except Exception:
+        return "unavailable", None
+    return ("ok", path) if path else ("cancel", None)
+
+
+def _pick_zenity():
+    exe = shutil.which("zenity")
+    if not exe:
+        return "unavailable", None
+    try:
+        r = subprocess.run(
+            [exe, "--file-selection", "--title=选择视频文件",
+             f"--file-filter={VIDEO_FILEFILTER}", "--file-filter=所有文件|*"],
+            capture_output=True, encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW, timeout=180)
+    except Exception:
+        return "unavailable", None
+    path = (r.stdout or "").strip()
+    return ("ok", path) if path else ("cancel", None)
+
+
+def _pick_kdialog():
+    exe = shutil.which("kdialog")
+    if not exe:
+        return "unavailable", None
+    try:
+        r = subprocess.run(
+            [exe, "--getopenfilename", os.path.expanduser("~"),
+             "*.mp4 *.m4v *.webm *.mov *.mkv *.avi *.flv *.ts *.wmv *.mpg *.mpeg *.3gp *.gif"],
+            capture_output=True, encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW, timeout=180)
+    except Exception:
+        return "unavailable", None
+    path = (r.stdout or "").strip()
+    return ("ok", path) if path else ("cancel", None)
+
+
+@app.post("/api/pick")
+def api_pick():
+    for picker in (_pick_tkinter, _pick_zenity, _pick_kdialog):
+        status, path = picker()
+        if status == "ok":
+            info = media_info(path, with_thumb=True)
+            if not info:
+                return jsonify({"error": "请选择支持的视频文件"}), 400
+            last_dir["path"] = info["dir"]
+            return jsonify({"path": path, "info": info})
+        if status == "cancel":
+            return jsonify({"path": None})
+    return jsonify({"error": "系统缺少文件选择组件（python3-tk / zenity / kdialog）。"
+                             "可安装 python3-tk，或直接把文件拖进窗口 / 粘贴完整路径"}), 500
 
 
 def open_ui(url):

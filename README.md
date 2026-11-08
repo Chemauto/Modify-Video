@@ -22,10 +22,11 @@
 
 **Ubuntu / Debian**
 - `sudo apt install ./modify-video_*_all.deb`
-- apt 会自动装齐 `python3-flask` 与 `ffmpeg`，无需手动配置任何环境
+- apt 会自动装齐 `python3-flask`、`python3-tk` 与 `ffmpeg`，无需手动配置任何环境
 - 安装后从应用菜单启动「Modify Video」，或终端执行 `modify-video`
 - 注意：请使用 `apt install ./包名`；`dpkg -i` 不会自动安装依赖，若已用过 dpkg 安装，执行 `sudo apt-get install -f` 即可补齐依赖并完成配置
-- WSL 中安装运行时，会自动调用 Windows 默认浏览器打开界面
+- WSL 中安装运行时，会自动调用 Windows 默认浏览器打开界面；粘贴 `D:\...` 这样的 Windows 路径会自动转换为 `/mnt/d/...`
+- 文件选择对话框按 tkinter → zenity → kdialog 依次回退；无图形界面的环境请直接拖拽文件或粘贴路径
 
 **源码方式**（开发者）
 - Windows：双击 `一键启动.bat`
