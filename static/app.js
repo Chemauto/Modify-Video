@@ -6,7 +6,7 @@ const el = {
   envBadge: $("#envBadge"),
   empty: $("#empty"), player: $("#player"),
   btnPick: $("#btnPick"), btnLoad: $("#btnLoad"), pathInput: $("#pathInput"),
-  video: $("#video"), meta: $("#meta"),
+  video: $("#video"), gifView: $("#gifView"), meta: $("#meta"),
   tl: $("#tl"), sel: $("#sel"), dimL: $("#dimL"), dimR: $("#dimR"),
   hA: $("#hA"), hB: $("#hB"), ph: $("#ph"), ruler: $("#ruler"), film: $("#film"),
   tA: $("#tA"), tB: $("#tB"), tCur: $("#tCur"), selLabel: $("#selLabel"),
@@ -37,6 +37,8 @@ const state = {
   pollTimer: null,
   prevPath: null,
   previewPending: false,
+  videoMode: "video",
+  pendingDuration: 0,
 };
 
 /* ---------------- 工具函数 ---------------- */
@@ -95,7 +97,25 @@ function setFile(path, info, fromPreview = false) {
   el.player.hidden = false;
   el.btnExport.disabled = false;
 
-  el.video.src = "/media?path=" + encodeURIComponent(path);
+  // GIF 结果用 <img> 预览（浏览器 <video> 无法播放 GIF）；
+  // 视频文件交给 <video>，加载失败时回退到 ffprobe 的时长刷新时间轴
+  const ext = (path.match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase();
+  state.videoMode = ext === "gif" ? "img" : "video";
+  if (state.videoMode === "img") {
+    el.video.hidden = true;
+    el.video.removeAttribute("src");
+    el.video.load();
+    el.gifView.src = "/media?path=" + encodeURIComponent(path);
+    el.gifView.hidden = false;
+    applyDuration(info.duration || 0);
+  } else {
+    el.gifView.hidden = true;
+    el.gifView.removeAttribute("src");
+    el.video.hidden = false;
+    state.pendingDuration = info.duration || 0;
+    el.video.src = "/media?path=" + encodeURIComponent(path);
+  }
+
   if (info.thumb) {
     el.film.style.backgroundImage = `url("${info.thumb}")`;
     el.film.classList.remove("no-thumb");
@@ -116,6 +136,28 @@ function setFile(path, info, fromPreview = false) {
     el.result.hidden = true;
     state.prevPath = null;
     el.btnBackEdit.hidden = true;
+  }
+}
+
+function applyDuration(d) {
+  if (!d || !isFinite(d) || d <= 0) return;
+  state.duration = d;
+  state.selA = 0;
+  state.selB = d;
+  el.video.playbackRate = state.speed;
+  renderTL();
+  renderRuler();
+  updateSelLabel();
+  if (state.previewPending) {
+    state.previewPending = false;
+    if (state.videoMode === "img") {
+      el.okLineText.textContent = "正在预览导出结果（GIF 循环动图）";
+    } else {
+      el.video.currentTime = state.selA;
+      const p = el.video.play();
+      if (p && p.catch) p.catch(() => {});
+      el.okLineText.textContent = "正在预览导出结果（播放中，可拖动时间轴检查）";
+    }
   }
 }
 
@@ -149,6 +191,10 @@ el.btnChange.addEventListener("click", () => {
   el.video.pause();
   el.video.removeAttribute("src");
   el.video.load();
+  el.gifView.removeAttribute("src");
+  el.gifView.hidden = true;
+  el.video.hidden = false;
+  state.videoMode = "video";
   state.path = null;
   el.player.hidden = true;
   el.empty.hidden = false;
@@ -210,20 +256,16 @@ function uploadFile(f) {
 
 /* ---------------- 预览与时间轴 ---------------- */
 el.video.addEventListener("loadedmetadata", () => {
-  const d = isFinite(el.video.duration) && el.video.duration > 0 ? el.video.duration : (state.info?.duration || 0);
-  state.duration = d;
-  state.selA = 0;
-  state.selB = d;
-  el.video.playbackRate = state.speed;
-  renderTL();
-  renderRuler();
-  updateSelLabel();
-  if (state.previewPending) {
-    state.previewPending = false;
-    el.video.currentTime = state.selA;
-    const p = el.video.play();
-    if (p && p.catch) p.catch(() => {});
-    el.okLineText.textContent = "正在预览导出结果（播放中，可拖动时间轴检查）";
+  const d = isFinite(el.video.duration) && el.video.duration > 0 ? el.video.duration : state.pendingDuration;
+  applyDuration(d);
+});
+el.video.addEventListener("error", () => {
+  if (state.videoMode === "video" && state.pendingDuration) {
+    applyDuration(state.pendingDuration);
+    if (state.previewPending) {
+      state.previewPending = false;
+      toast("该格式浏览器无法直接预览，时间轴已按导出文件刷新", true);
+    }
   }
 });
 el.video.addEventListener("timeupdate", () => {
@@ -307,6 +349,7 @@ function clampSel() {
 }
 
 el.btnPlay.addEventListener("click", () => {
+  if (state.videoMode === "img") return;
   if (el.video.paused) {
     if (el.video.currentTime >= state.selB - 0.05 || el.video.currentTime < state.selA) {
       el.video.currentTime = state.selA;

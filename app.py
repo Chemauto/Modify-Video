@@ -68,7 +68,7 @@ CONTAINER_KEYS = {
 
 
 # FFmpeg 自动下载：优先使用本项目 Releases 中的资源包，失败时回退到官方上游构建
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 RELEASE_BASE = "https://github.com/Chemauto/Modify-Video/releases/download/v1.0.1/"
 REPO_API_LATEST = "https://api.github.com/repos/Chemauto/Modify-Video/releases/latest"
 DOWNLOAD_URL_PREFIX = "https://github.com/Chemauto/Modify-Video/releases/download/"
