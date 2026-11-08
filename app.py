@@ -553,6 +553,28 @@ def api_cancel():
     return jsonify({"ok": True})
 
 
+def is_wsl():
+    try:
+        with open("/proc/version", "r", encoding="utf-8", errors="ignore") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+def open_ui(url):
+    ok = False
+    try:
+        ok = webbrowser.open(url)
+    except Exception:
+        ok = False
+    if not ok and is_wsl() and shutil.which("cmd.exe"):
+        try:
+            subprocess.Popen(["cmd.exe", "/c", "start", "", url],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+
 @app.post("/api/reveal")
 def api_reveal():
     path = (request.get_json(silent=True) or {}).get("path", "")
@@ -561,7 +583,18 @@ def api_reveal():
     if os.name == "nt":
         subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
     else:
-        subprocess.Popen(["xdg-open", os.path.dirname(path)])
+        win_path = ""
+        if is_wsl():
+            try:
+                r = subprocess.run(["wslpath", "-w", path], capture_output=True, text=True)
+                win_path = (r.stdout or "").strip()
+            except Exception:
+                win_path = ""
+        if win_path and shutil.which("explorer.exe"):
+            subprocess.Popen(["explorer.exe", "/select,", os.path.normpath(win_path)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(["xdg-open", os.path.dirname(path)])
     return jsonify({"ok": True})
 
 
@@ -592,5 +625,5 @@ if __name__ == "__main__":
     url = f"http://127.0.0.1:{port}"
     print(f"Modify Video 运行中：{url}（关闭本窗口即退出）")
     if not os.environ.get("VIDEOCHANGE_NO_BROWSER"):
-        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+        threading.Timer(1.0, lambda: open_ui(url)).start()
     app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
