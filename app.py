@@ -68,7 +68,10 @@ CONTAINER_KEYS = {
 
 
 # FFmpeg 自动下载：优先使用本项目 Releases 中的资源包，失败时回退到官方上游构建
+APP_VERSION = "1.0.3"
 RELEASE_BASE = "https://github.com/Chemauto/Modify-Video/releases/download/v1.0.1/"
+REPO_API_LATEST = "https://api.github.com/repos/Chemauto/Modify-Video/releases/latest"
+DOWNLOAD_URL_PREFIX = "https://github.com/Chemauto/Modify-Video/releases/download/"
 PLATFORM_ASSETS = {
     ("windows", "amd64"): ("ffmpeg-win64.zip",
                            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"),
@@ -632,6 +635,112 @@ def open_ui(url):
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
+
+
+# ---------- 检查更新 ----------
+def parse_ver(tag):
+    m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", tag or "")
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def update_mode():
+    if getattr(sys, "frozen", False):
+        return "exe"
+    if os.path.isdir(os.path.join(BASE_DIR, ".git")):
+        return "source"
+    return "system"
+
+
+@app.get("/api/update/check")
+def api_update_check():
+    tag = notes = page_url = ""
+    try:
+        req = urllib.request.Request(REPO_API_LATEST, headers={
+            "User-Agent": "ModifyVideo/" + APP_VERSION,
+            "Accept": "application/vnd.github+json",
+        })
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        tag = data.get("tag_name", "")
+        notes = data.get("body", "")
+        page_url = data.get("html_url", "")
+        assets = [{"name": a.get("name", ""), "url": a.get("browser_download_url", ""), "size": a.get("size", 0)}
+                  for a in data.get("assets", [])]
+    except Exception:
+        # GitHub API 限流时回退：从 releases/latest 的重定向地址解析版本号
+        try:
+            req = urllib.request.Request("https://github.com/Chemauto/Modify-Video/releases/latest",
+                                         headers={"User-Agent": "ModifyVideo/" + APP_VERSION})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                m = re.search(r"/releases/tag/(v[\d.]+)", r.geturl())
+            tag = m.group(1) if m else ""
+            notes = ""
+            page_url = f"https://github.com/Chemauto/Modify-Video/releases/tag/{tag}" if tag else ""
+            v = tag.lstrip("v")
+            assets = [
+                {"name": f"ModifyVideo-{v}-setup.exe",
+                 "url": f"{DOWNLOAD_URL_PREFIX}{tag}/ModifyVideo-{v}-setup.exe", "size": 0},
+                {"name": f"modify-video_{v}_all.deb",
+                 "url": f"{DOWNLOAD_URL_PREFIX}{tag}/modify-video_{v}_all.deb", "size": 0},
+            ] if tag else []
+        except Exception as e2:
+            return jsonify({"error": f"无法连接 GitHub：{e2}"}), 502
+    latest, current = parse_ver(tag), parse_ver(APP_VERSION)
+    return jsonify({
+        "current": APP_VERSION,
+        "latest": tag,
+        "updateAvailable": bool(latest and current and latest > current),
+        "notes": notes,
+        "url": page_url,
+        "assets": assets,
+        "mode": update_mode(),
+    })
+
+
+def downloads_dir():
+    d = os.path.join(os.path.expanduser("~"), "Downloads")
+    return d if os.path.isdir(d) else os.path.expanduser("~")
+
+
+@app.post("/api/update/download")
+def api_update_download():
+    body = request.get_json(silent=True) or {}
+    url = (body.get("url") or "").strip()
+    if not url.startswith(DOWNLOAD_URL_PREFIX):
+        return jsonify({"error": "非法的下载地址"}), 400
+    name = os.path.basename(url.split("?")[0])
+    if not (name.endswith(".exe") or name.endswith(".deb")):
+        return jsonify({"error": "没有适配当前系统的安装包"}), 400
+    dest = os.path.join(downloads_dir(), name)
+    try:
+        download_with_progress(url, dest)
+    except Exception as e:
+        return jsonify({"error": f"下载失败：{e}"}), 502
+    result = {"ok": True, "path": dest, "launched": False}
+    if name.endswith(".exe") and os.name == "nt":
+        try:
+            subprocess.Popen([dest, "/closeapplications", "/restartexitapplication"],
+                             creationflags=CREATE_NO_WINDOW, detached_process=True)
+            result["launched"] = True
+        except Exception:
+            result["hint"] = f"自动运行失败，请手动执行：{dest}"
+    return jsonify(result)
+
+
+@app.post("/api/update/gitpull")
+def api_update_gitpull():
+    if update_mode() != "source":
+        return jsonify({"error": "当前不是源码方式运行"}), 400
+    try:
+        r = subprocess.run(["git", "-C", BASE_DIR, "pull", "--ff-only"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=180)
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        return jsonify({"ok": r.returncode == 0, "output": out[-1200:] or f"退出码 {r.returncode}"})
+    except FileNotFoundError:
+        return jsonify({"error": "未安装 git，无法同步更新"}), 400
+    except Exception as e:
+        return jsonify({"error": f"更新失败：{e}"}), 500
 
 
 @app.post("/api/reveal")

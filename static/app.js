@@ -18,7 +18,9 @@ const el = {
   speed: $("#speed"), speedVal: $("#speedVal"), speedChips: $("#speedChips"),
   btnExport: $("#btnExport"),
   prog: $("#prog"), progBar: $("#progBar"), progText: $("#progText"), btnCancel: $("#btnCancel"),
-  result: $("#result"), outPath: $("#outPath"), btnReveal: $("#btnReveal"), btnPreviewOut: $("#btnPreviewOut"),
+  result: $("#result"), okLineText: $("#okLineText"), outPath: $("#outPath"),
+  btnReveal: $("#btnReveal"), btnPreviewOut: $("#btnPreviewOut"), btnBackEdit: $("#btnBackEdit"),
+  btnUpdate: $("#btnUpdate"), updatePanel: $("#updatePanel"),
   dropOverlay: $("#dropOverlay"), toast: $("#toast"),
 };
 
@@ -33,6 +35,8 @@ const state = {
   exporting: false,
   outputPath: null,
   pollTimer: null,
+  prevPath: null,
+  previewPending: false,
 };
 
 /* ---------------- 工具函数 ---------------- */
@@ -83,11 +87,10 @@ async function postJSON(url, data) {
 })();
 
 /* ---------------- 文件载入 ---------------- */
-function setFile(path, info) {
+function setFile(path, info, fromPreview = false) {
   state.path = path;
   state.info = info;
   state.outputPath = null;
-  el.result.hidden = true;
   el.empty.hidden = true;
   el.player.hidden = false;
   el.btnExport.disabled = false;
@@ -103,13 +106,24 @@ function setFile(path, info) {
   el.meta.textContent =
     `${info.name} · ${info.width || "?"}×${info.height || "?"} · ${fmtSize(info.size)}` +
     (info.hasAudio ? "" : " · 无音轨");
+
+  if (fromPreview) {
+    el.result.hidden = false;
+    el.okLineText.textContent = "正在预览导出结果";
+    el.outPath.textContent = path;
+    el.btnBackEdit.hidden = !state.prevPath;
+  } else {
+    el.result.hidden = true;
+    state.prevPath = null;
+    el.btnBackEdit.hidden = true;
+  }
 }
 
-async function loadPath(path) {
+async function loadPath(path, fromPreview = false) {
   if (!path) return;
   try {
     const j = await postJSON("/api/load", { path });
-    setFile(j.path, j.info);
+    setFile(j.path, j.info, fromPreview);
   } catch (e) {
     toast(e.message, true);
   }
@@ -204,6 +218,13 @@ el.video.addEventListener("loadedmetadata", () => {
   renderTL();
   renderRuler();
   updateSelLabel();
+  if (state.previewPending) {
+    state.previewPending = false;
+    el.video.currentTime = state.selA;
+    const p = el.video.play();
+    if (p && p.catch) p.catch(() => {});
+    el.okLineText.textContent = "正在预览导出结果（播放中，可拖动时间轴检查）";
+  }
 });
 el.video.addEventListener("timeupdate", () => {
   el.tCur.textContent = fmtTime(el.video.currentTime);
@@ -218,6 +239,13 @@ el.video.addEventListener("timeupdate", () => {
 });
 el.video.addEventListener("play", () => setPlayIcon(true));
 el.video.addEventListener("pause", () => setPlayIcon(false));
+el.video.addEventListener("ended", () => {
+  if (el.chkLoop.checked && state.selB - state.selA > 0.1) {
+    el.video.currentTime = state.selA;
+    const p = el.video.play();
+    if (p && p.catch) p.catch(() => {});
+  }
+});
 
 function setPlayIcon(playing) {
   el.icPlay.style.display = playing ? "none" : "";
@@ -470,5 +498,155 @@ el.btnReveal.addEventListener("click", async () => {
 
 el.btnPreviewOut.addEventListener("click", () => {
   if (!state.outputPath) return;
-  loadPath(state.outputPath);
+  state.prevPath = state.path;
+  state.previewPending = true;
+  toast("正在载入导出结果…");
+  loadPath(state.outputPath, true);
 });
+
+el.btnBackEdit.addEventListener("click", () => {
+  if (!state.prevPath) return;
+  loadPath(state.prevPath);
+});
+
+/* ---------------- 检查更新 ---------------- */
+const UP = { open: false, data: null, busy: false };
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => (
+  { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const cleanNotes = (s) => String(s || "")
+  .replace(/\r/g, "").replace(/^#+\s*/gm, "").replace(/\*\*/g, "").replace(/`/g, "").trim();
+const pickAsset = (assets, re) => (assets || []).find((a) => re.test(a.name));
+const fmtMB = (n) => (n / 1048576).toFixed(0) + " MB";
+
+el.btnUpdate.addEventListener("click", () => {
+  UP.open = !UP.open;
+  el.updatePanel.hidden = !UP.open;
+  if (UP.open) {
+    if (!UP.data && !UP.busy) runCheck();
+    else renderUpdate();
+  }
+});
+
+document.addEventListener("click", (e) => {
+  if (!UP.open) return;
+  if (el.updatePanel.contains(e.target) || el.btnUpdate.contains(e.target)) return;
+  UP.open = false;
+  el.updatePanel.hidden = true;
+});
+
+function runCheck() {
+  UP.busy = true;
+  renderUpdate({ phase: "checking" });
+  fetch("/api/update/check")
+    .then((r) => r.json())
+    .then((j) => { UP.busy = false; UP.data = j; renderUpdate(); })
+    .catch((e) => { UP.busy = false; renderUpdate({ phase: "error", message: e.message }); });
+}
+
+function updateHead(title) {
+  return `<div class="update-head"><span>${title}</span>
+    <button class="update-close" id="updClose" title="关闭">✕</button></div>`;
+}
+
+function renderUpdate(o = {}) {
+  const p = el.updatePanel;
+  if (o.phase === "checking") {
+    p.innerHTML = updateHead("检查更新") + `<div class="update-ver">正在连接 GitHub…</div>`;
+  } else if (o.phase === "error" || (UP.data && UP.data.error)) {
+    const msg = esc(o.message || (UP.data && UP.data.error) || "未知错误");
+    p.innerHTML = updateHead("检查更新") +
+      `<div class="update-ver">检查失败：${msg}</div>
+       <div class="update-actions"><button id="updRetry" class="btn">重试</button></div>`;
+  } else {
+    const d = UP.data;
+    const verLine = d.updateAvailable
+      ? `发现新版本 <b>${esc(d.latest)}</b>（当前 v${esc(d.current)}）`
+      : `已是最新版本 v${esc(d.current)}`;
+    let html = updateHead(d.updateAvailable ? "发现更新" : "检查更新") +
+      `<div class="update-ver">${verLine}</div>`;
+    if (d.updateAvailable && d.notes) {
+      html += `<div class="update-notes">${esc(cleanNotes(d.notes))}</div>`;
+    }
+    const acts = [];
+    if (d.updateAvailable) {
+      if (d.mode === "exe") {
+        const a = pickAsset(d.assets, /-setup\.exe$/);
+        if (a) acts.push(`<button id="updDl" class="btn primary" data-url="${esc(a.url)}" data-size="${a.size}">下载并运行安装程序${a.size ? `（${fmtMB(a.size)}）` : ""}</button>`);
+      } else if (d.mode === "system") {
+        const a = pickAsset(d.assets, /_all\.deb$/);
+        if (a) acts.push(`<button id="updDl" class="btn primary" data-url="${esc(a.url)}" data-size="${a.size}">下载 deb 安装包${a.size ? `（${fmtMB(a.size)}）` : ""}</button>`);
+      } else if (d.mode === "source") {
+        acts.push(`<button id="updGit" class="btn primary">通过 git 同步更新</button>`);
+      }
+    } else if (d.mode === "source") {
+      acts.push(`<button id="updGit" class="btn">同步代码（git pull）</button>`);
+    }
+    if (d.url) acts.push(`<button id="updPage" class="btn ghost">打开发布页</button>`);
+    html += `<div class="update-actions">${acts.join("")}</div><div id="updMsg"></div>`;
+    p.innerHTML = html;
+  }
+
+  const q = (s) => p.querySelector(s);
+  const close = q("#updClose");
+  if (close) close.addEventListener("click", () => { UP.open = false; el.updatePanel.hidden = true; });
+  const retry = q("#updRetry");
+  if (retry) retry.addEventListener("click", runCheck);
+
+  const dl = q("#updDl");
+  if (dl) dl.addEventListener("click", async () => {
+    if (UP.busy) return;
+    UP.busy = true;
+    dl.disabled = true;
+    const size = dl.dataset.size;
+    dl.textContent = `正在下载…（${fmtMB(size)}，请稍候）`;
+    const msg = q("#updMsg");
+    try {
+      const j = await postJSON("/api/update/download", { url: dl.dataset.url });
+      UP.busy = false;
+      if (j.launched) {
+        toast("安装程序已启动，请按提示完成更新（应用会自动重启）");
+        UP.open = false;
+        el.updatePanel.hidden = true;
+      } else {
+        msg.innerHTML = `<div class="update-cmd"><span>sudo apt install -y &quot;${esc(j.path)}&quot;</span>
+          <button id="updCopy" class="btn">复制命令</button></div>
+          <p class="hint">安装包已下载，执行上方命令完成升级</p>`;
+        const cp = q("#updCopy");
+        if (cp) cp.addEventListener("click", () => {
+          navigator.clipboard.writeText(`sudo apt install -y "${j.path}"`).then(() => toast("已复制"));
+        });
+      }
+    } catch (e) {
+      UP.busy = false;
+      dl.disabled = false;
+      msg.innerHTML = `<p class="hint">${esc(e.message)}</p>`;
+    }
+  });
+
+  const git = q("#updGit");
+  if (git) git.addEventListener("click", async () => {
+    if (UP.busy) return;
+    UP.busy = true;
+    git.disabled = true;
+    git.textContent = "正在同步…";
+    const msg = q("#updMsg");
+    try {
+      const j = await postJSON("/api/update/gitpull");
+      UP.busy = false;
+      msg.innerHTML = `<p class="hint">${esc(j.output || (j.ok ? "已同步到最新代码" : "同步失败"))}${j.ok ? "，请重启应用生效" : ""}</p>`;
+      if (j.ok) toast("代码已同步，重启应用后生效");
+    } catch (e) {
+      UP.busy = false;
+      msg.innerHTML = `<p class="hint">${esc(e.message)}</p>`;
+      git.disabled = false;
+      git.textContent = "通过 git 同步更新";
+    }
+  });
+
+  const page = q("#updPage");
+  if (page) page.addEventListener("click", () => {
+    const d = UP.data;
+    if (d && d.url) window.open(d.url, "_blank");
+  });
+}
