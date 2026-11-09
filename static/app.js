@@ -21,6 +21,15 @@ const el = {
   result: $("#result"), okLineText: $("#okLineText"), outPath: $("#outPath"),
   btnReveal: $("#btnReveal"), btnPreviewOut: $("#btnPreviewOut"), btnBackEdit: $("#btnBackEdit"),
   btnUpdate: $("#btnUpdate"), updatePanel: $("#updatePanel"),
+  tabEdit: $("#tabEdit"), tabCompress: $("#tabCompress"),
+  editorExtras: $("#editorExtras"), editPanel: $("#editPanel"), compressPanel: $("#compressPanel"),
+  strengthChips: $("#strengthChips"), cmpRes: $("#cmpRes"), cmpFmtSeg: $("#cmpFmtSeg"),
+  vidCmpFields: $("#vidCmpFields"), imgCmpFields: $("#imgCmpFields"),
+  imgFmtSeg: $("#imgFmtSeg"), imgQuality: $("#imgQuality"), imgQVal: $("#imgQVal"), imgWidth: $("#imgWidth"),
+  btnCompress: $("#btnCompress"),
+  cmpProg: $("#cmpProg"), cmpBar: $("#cmpBar"), cmpText: $("#cmpText"), cmpCancel: $("#cmpCancel"),
+  cmpResult: $("#cmpResult"), cmpOkText: $("#cmpOkText"), cmpSize: $("#cmpSize"),
+  cmpReveal: $("#cmpReveal"), cmpPreview: $("#cmpPreview"),
   dropOverlay: $("#dropOverlay"), toast: $("#toast"),
 };
 
@@ -39,6 +48,12 @@ const state = {
   previewPending: false,
   videoMode: "video",
   pendingDuration: 0,
+  mode: "edit",
+  kind: "video",
+  compressing: false,
+  cmpOutput: null,
+  cmpOriginalSize: 0,
+  cmpTimer: null,
 };
 
 /* ---------------- 工具函数 ---------------- */
@@ -100,7 +115,8 @@ function setFile(path, info, fromPreview = false) {
   // GIF 结果用 <img> 预览（浏览器 <video> 无法播放 GIF）；
   // 视频文件交给 <video>，加载失败时回退到 ffprobe 的时长刷新时间轴
   const ext = (path.match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase();
-  state.videoMode = ext === "gif" ? "img" : "video";
+  state.kind = ["jpg", "jpeg", "png", "webp", "bmp"].includes(ext) ? "image" : "video";
+  state.videoMode = ext === "gif" || state.kind === "image" ? "img" : "video";
   if (state.videoMode === "img") {
     el.video.hidden = true;
     el.video.removeAttribute("src");
@@ -125,18 +141,26 @@ function setFile(path, info, fromPreview = false) {
   }
   el.meta.textContent =
     `${info.name} · ${info.width || "?"}×${info.height || "?"} · ${fmtSize(info.size)}` +
-    (info.hasAudio ? "" : " · 无音轨");
+    (info.kind === "image" ? " · 图片" : (info.hasAudio ? "" : " · 无音轨"));
+  el.tabEdit.disabled = state.kind === "image";
+  el.vidCmpFields.hidden = state.kind !== "video";
+  el.imgCmpFields.hidden = state.kind !== "image";
+  el.btnCompress.disabled = false;
+  if (state.kind === "image") setMode("compress");
 
   if (fromPreview) {
     el.result.hidden = false;
     el.okLineText.textContent = "正在预览导出结果";
     el.outPath.textContent = path;
+    el.btnBackEdit.textContent = state.kind === "image" ? "返回原文件" : "返回编辑原视频";
     el.btnBackEdit.hidden = !state.prevPath;
   } else {
     el.result.hidden = true;
     state.prevPath = null;
     el.btnBackEdit.hidden = true;
   }
+  el.cmpResult.hidden = true;
+  state.cmpOutput = null;
 }
 
 function applyDuration(d) {
@@ -474,6 +498,7 @@ el.btnExport.addEventListener("click", async () => {
   if (state.selB - state.selA < 0.05) return toast("所选时间范围太短", true);
   state.exporting = true;
   el.btnExport.disabled = true;
+  el.btnCompress.disabled = true;
   el.result.hidden = true;
   el.prog.hidden = false;
   el.progBar.style.width = "0%";
@@ -492,6 +517,7 @@ el.btnExport.addEventListener("click", async () => {
   } catch (e) {
     state.exporting = false;
     el.btnExport.disabled = false;
+    el.btnCompress.disabled = false;
     el.prog.hidden = true;
     toast(e.message, true);
   }
@@ -512,6 +538,7 @@ function pollStatus() {
       el.progBar.style.width = "0%";
       state.exporting = false;
       el.btnExport.disabled = false;
+      el.btnCompress.disabled = false;
       if (j.output) {
         state.outputPath = j.output;
         el.outPath.textContent = j.output;
@@ -531,6 +558,7 @@ el.btnCancel.addEventListener("click", async () => {
   el.prog.hidden = true;
   state.exporting = false;
   el.btnExport.disabled = false;
+  el.btnCompress.disabled = false;
   toast("已取消导出");
 });
 
@@ -693,3 +721,140 @@ function renderUpdate(o = {}) {
     if (d && d.url) window.open(d.url, "_blank");
   });
 }
+
+/* ---------------- 模式切换 ---------------- */
+function setMode(mode) {
+  if (mode === "edit" && state.kind === "image") return;
+  if (state.mode === mode) return;
+  state.mode = mode;
+  if (mode === "compress") el.video.pause();
+  el.tabEdit.classList.toggle("active", mode === "edit");
+  el.tabCompress.classList.toggle("active", mode === "compress");
+  el.editorExtras.hidden = mode !== "edit";
+  el.editPanel.hidden = mode !== "edit";
+  el.compressPanel.hidden = mode !== "compress";
+}
+el.tabEdit.addEventListener("click", () => setMode("edit"));
+el.tabCompress.addEventListener("click", () => setMode("compress"));
+
+/* ---------------- 压缩流程 ---------------- */
+el.strengthChips.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-strength]");
+  if (!b) return;
+  el.strengthChips.querySelectorAll("button").forEach((x) => x.classList.toggle("active", x === b));
+});
+el.cmpFmtSeg.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-fmt]");
+  if (!b) return;
+  el.cmpFmtSeg.querySelectorAll("button").forEach((x) => x.classList.toggle("active", x === b));
+});
+el.imgFmtSeg.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-fmt]");
+  if (!b) return;
+  el.imgFmtSeg.querySelectorAll("button").forEach((x) => x.classList.toggle("active", x === b));
+  el.imgQuality.disabled = b.dataset.fmt === "png";
+});
+el.imgQuality.addEventListener("input", () => {
+  el.imgQVal.textContent = el.imgQuality.value;
+  paintRange(el.imgQuality);
+});
+paintRange(el.imgQuality);
+
+el.btnCompress.addEventListener("click", async () => {
+  if (!state.path || state.compressing || state.exporting) return;
+  const isImg = state.kind === "image";
+  const body = { path: state.path };
+  if (isImg) {
+    body.fmt = el.imgFmtSeg.querySelector("button.active").dataset.fmt;
+    body.imgQuality = parseInt(el.imgQuality.value, 10);
+    body.imgWidth = parseInt(el.imgWidth.value, 10);
+  } else {
+    body.fmt = el.cmpFmtSeg.querySelector("button.active").dataset.fmt;
+    body.strength = el.strengthChips.querySelector("button.active").dataset.strength;
+    body.res = parseInt(el.cmpRes.value, 10);
+  }
+  state.compressing = true;
+  state.cmpOriginalSize = state.info?.size || 0;
+  el.btnCompress.disabled = true;
+  el.btnExport.disabled = true;
+  el.cmpResult.hidden = true;
+  el.cmpProg.hidden = false;
+  el.cmpBar.style.width = "0%";
+  el.cmpText.textContent = "正在压缩…";
+  try {
+    await postJSON("/api/compress", body);
+    pollCompress();
+  } catch (e) {
+    state.compressing = false;
+    el.btnCompress.disabled = false;
+    el.btnExport.disabled = false;
+    el.cmpProg.hidden = true;
+    toast(e.message, true);
+  }
+});
+
+function pollCompress() {
+  clearTimeout(state.cmpTimer);
+  state.cmpTimer = setTimeout(async () => {
+    try {
+      const j = await (await fetch("/api/status")).json();
+      if (j.running) {
+        el.cmpBar.style.width = (j.progress || 0) + "%";
+        el.cmpText.textContent = `正在压缩 ${j.progress || 0}%`;
+        pollCompress();
+        return;
+      }
+      el.cmpProg.hidden = true;
+      el.cmpBar.style.width = "0%";
+      state.compressing = false;
+      el.btnCompress.disabled = false;
+      el.btnExport.disabled = false;
+      if (j.output) {
+        state.cmpOutput = j.output;
+        el.cmpResult.hidden = false;
+        el.cmpOkText.textContent = "压缩完成";
+        el.cmpSize.textContent = "统计中…";
+        try {
+          const info = (await postJSON("/api/load", { path: j.output })).info;
+          const a = state.cmpOriginalSize, b = info.size;
+          if (a > 0) {
+            el.cmpSize.textContent = b < a
+              ? `${fmtSize(a)} → ${fmtSize(b)}（缩小 ${Math.round((1 - b / a) * 100)}%）`
+              : `${fmtSize(a)} → ${fmtSize(b)}（体积未减小，可尝试更高强度或更换格式）`;
+          } else {
+            el.cmpSize.textContent = fmtSize(b);
+          }
+        } catch {
+          el.cmpSize.textContent = j.output;
+        }
+        toast("压缩完成 🎉");
+      } else if (j.error) {
+        toast(`压缩失败：${j.error}`, true);
+      }
+    } catch {
+      pollCompress();
+    }
+  }, 400);
+}
+
+el.cmpCancel.addEventListener("click", async () => {
+  try { await postJSON("/api/cancel"); } catch {}
+  el.cmpProg.hidden = true;
+  state.compressing = false;
+  el.btnCompress.disabled = false;
+  el.btnExport.disabled = false;
+  toast("已取消压缩");
+});
+
+el.cmpReveal.addEventListener("click", async () => {
+  if (!state.cmpOutput) return;
+  try { await postJSON("/api/reveal", { path: state.cmpOutput }); } catch (e) { toast(e.message, true); }
+});
+
+el.cmpPreview.addEventListener("click", () => {
+  if (!state.cmpOutput) return;
+  state.prevPath = state.path;
+  state.previewPending = true;
+  toast("正在载入压缩结果…");
+  loadPath(state.cmpOutput, true);
+});

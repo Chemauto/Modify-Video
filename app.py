@@ -46,6 +46,8 @@ VIDEO_EXTS = {
     ".mp4", ".m4v", ".webm", ".mov", ".mkv", ".avi", ".flv",
     ".ts", ".wmv", ".mpg", ".mpeg", ".3gp", ".gif",
 }
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+MEDIA_EXTS = VIDEO_EXTS | IMAGE_EXTS
 EXPORT_FORMATS = {"mp4", "webm", "gif", "mkv", "avi", "mov"}
 
 MIMETYPES = {
@@ -54,6 +56,8 @@ MIMETYPES = {
     ".gif": "image/gif", ".flv": "video/x-flv", ".ts": "video/mp2t",
     ".wmv": "video/x-ms-wmv", ".mpg": "video/mpeg", ".mpeg": "video/mpeg",
     ".3gp": "video/3gpp",
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".webp": "image/webp", ".bmp": "image/bmp",
 }
 
 # 输出格式 -> ffprobe format_name 的成员，用于判断能否流复制（免转码快速导出）
@@ -68,7 +72,7 @@ CONTAINER_KEYS = {
 
 
 # FFmpeg 自动下载：优先使用本项目 Releases 中的资源包，失败时回退到官方上游构建
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 RELEASE_BASE = "https://github.com/Chemauto/Modify-Video/releases/download/v1.0.1/"
 REPO_API_LATEST = "https://api.github.com/repos/Chemauto/Modify-Video/releases/latest"
 DOWNLOAD_URL_PREFIX = "https://github.com/Chemauto/Modify-Video/releases/download/"
@@ -257,12 +261,13 @@ def make_thumb(path, duration):
 def media_info(path, with_thumb=False):
     if not path or not os.path.isfile(path):
         return None
-    if os.path.splitext(path)[1].lower() not in VIDEO_EXTS:
+    if os.path.splitext(path)[1].lower() not in MEDIA_EXTS:
         return None
     try:
         info = probe(path)
     except Exception:
         return None
+    info["kind"] = "image" if os.path.splitext(path)[1].lower() in IMAGE_EXTS else "video"
     if with_thumb:
         info["thumb"] = make_thumb(path, info["duration"])
     return info
@@ -299,13 +304,13 @@ def video_codec_args(fmt):
     return []
 
 
-def unique_output_path(src, fmt):
+def unique_output_path(src, fmt, tag="edited"):
     stem = os.path.splitext(os.path.basename(src))[0]
     directory = os.path.dirname(src)
-    candidate = os.path.join(directory, f"{stem}_edited.{fmt}")
+    candidate = os.path.join(directory, f"{stem}_{tag}.{fmt}")
     n = 2
     while os.path.exists(candidate):
-        candidate = os.path.join(directory, f"{stem}_edited_{n}.{fmt}")
+        candidate = os.path.join(directory, f"{stem}_{tag}_{n}.{fmt}")
         n += 1
     return candidate
 
@@ -362,7 +367,8 @@ def build_command(cfg):
 def run_export(cfg):
     proc = None
     try:
-        proc = subprocess.Popen(build_command(cfg), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cmd = cfg.get("command") or build_command(cfg)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, encoding="utf-8", errors="replace",
                                 creationflags=CREATE_NO_WINDOW)
         with job_lock:
@@ -431,7 +437,7 @@ def api_upload():
     stem, ext = os.path.splitext(name)
     stem = re.sub(r'[\\/:*?"<>|]', "_", stem) or "video"
     ext = ext.lower()
-    if ext not in VIDEO_EXTS:
+    if ext not in MEDIA_EXTS:
         return jsonify({"error": f"不支持的格式：{ext or '未知'}"}), 400
     dest = os.path.join(UPLOAD_DIR, stem + ext)
     n = 2
@@ -442,6 +448,7 @@ def api_upload():
     try:
         info = probe(dest)
         info["thumb"] = make_thumb(dest, info["duration"])
+        info["kind"] = "image" if ext in IMAGE_EXTS else "video"
     except Exception as e:
         try:
             os.remove(dest)
@@ -455,7 +462,7 @@ def api_upload():
 def media():
     path = request.args.get("path", "")
     ext = os.path.splitext(path)[1].lower()
-    if not os.path.isfile(path) or ext not in VIDEO_EXTS:
+    if not os.path.isfile(path) or ext not in MEDIA_EXTS:
         return "not found", 404
     resp = send_file(path, mimetype=MIMETYPES.get(ext, "application/octet-stream"), conditional=True)
     resp.headers["Accept-Ranges"] = "bytes"
@@ -505,6 +512,99 @@ def api_export():
     return jsonify({"ok": True, "output": cfg["output"]})
 
 
+STRENGTH_CRF = {"light": 18, "balanced": 23, "strong": 28, "extreme": 33}
+STRENGTH_VPX = {"light": 20, "balanced": 31, "strong": 38, "extreme": 45}
+
+
+def build_compress_command(cfg):
+    src, out = cfg["path"], cfg["output"]
+    cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-nostats",
+           "-progress", "pipe:1", "-i", src]
+    if cfg["media_kind"] == "video":
+        vf = []
+        target = int(cfg.get("res") or 0)
+        if target and cfg.get("height", 0) > target:
+            vf.append(f"scale=-2:{target}")
+        if cfg["format"] == "webm":
+            cmd += ["-c:v", "libvpx-vp9", "-crf", str(STRENGTH_VPX.get(cfg.get("strength"), 31)),
+                    "-b:v", "0", "-deadline", "good", "-cpu-used", "4",
+                    "-c:a", "libopus" if has_encoder("libopus") else "libvorbis", "-b:a", "96k"]
+        else:
+            cmd += ["-c:v", "libx264", "-preset", "veryfast",
+                    "-crf", str(STRENGTH_CRF.get(cfg.get("strength"), 23)),
+                    "-pix_fmt", "yuv420p",
+                    "-c:a", "aac",
+                    "-b:a", "128k" if cfg.get("strength") in ("light", "balanced") else "96k",
+                    "-movflags", "+faststart"]
+        if vf:
+            cmd += ["-vf", ",".join(vf)]
+        cmd += [out]
+        return cmd
+    # 图片
+    vf = []
+    w = int(cfg.get("imgWidth") or 0)
+    if w > 0:
+        vf.append(f"scale='min(iw,{w})':-2:flags=lanczos")
+    if vf:
+        cmd += ["-vf", ",".join(vf)]
+    if cfg["format"] == "jpg":
+        q = max(10, min(100, int(cfg.get("imgQuality") or 80)))
+        qv = max(2, min(31, round((101 - q) / 3.3)))
+        cmd += ["-c:v", "mjpeg", "-q:v", str(qv), "-pix_fmt", "yuvj420p"]
+    elif cfg["format"] == "webp":
+        cmd += ["-c:v", "libwebp", "-quality", str(max(10, min(100, int(cfg.get("imgQuality") or 80))))]
+    else:
+        cmd += ["-compression_level", "9"]
+    cmd += [out]
+    return cmd
+
+
+@app.post("/api/compress")
+def api_compress():
+    with job_lock:
+        if job["running"]:
+            return jsonify({"error": "已有任务正在进行，请先等待完成或取消"}), 409
+    body = request.get_json(silent=True) or {}
+    path = (body.get("path") or "").strip()
+    info = media_info(path)
+    if not info:
+        return jsonify({"error": "源文件无效"}), 400
+    kind = info["kind"]
+    fmt = body.get("fmt") or {"video": "mp4", "image": "jpg"}[kind]
+    if kind == "video" and fmt not in ("mp4", "webm"):
+        return jsonify({"error": f"不支持的输出格式：{fmt}"}), 400
+    if kind == "image" and fmt not in ("jpg", "webp", "png"):
+        return jsonify({"error": f"不支持的输出格式：{fmt}"}), 400
+    if fmt == "webm" and not has_encoder("libvpx-vp9"):
+        return jsonify({"error": "当前 FFmpeg 缺少 VP9 编码器，请选择 MP4"}), 400
+    if fmt == "webp" and not has_encoder("libwebp"):
+        return jsonify({"error": "当前 FFmpeg 缺少 WebP 编码器，请选择 JPG"}), 400
+    cfg = {
+        "path": path,
+        "output": unique_output_path(path, fmt, tag="compressed"),
+        "kind": "compress",
+        "media_kind": kind,
+        "format": fmt,
+        "verb": "正在压缩…",
+        "total": max(0.01, info["duration"] or 1),
+    }
+    if kind == "video":
+        cfg["strength"] = body.get("strength") or "balanced"
+        cfg["res"] = int(body.get("res") or 0)
+        cfg["height"] = info["height"] or 0
+    else:
+        cfg["imgQuality"] = int(body.get("imgQuality") or 80)
+        cfg["imgWidth"] = int(body.get("imgWidth") or 0)
+    try:
+        cfg["command"] = build_compress_command(cfg)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+    with job_lock:
+        job.update(running=True, progress=0.0, message=cfg["verb"], output="", error="", cancel=False)
+    threading.Thread(target=run_export, args=(cfg,), daemon=True).start()
+    return jsonify({"ok": True, "output": cfg["output"]})
+
+
 @app.get("/api/status")
 def api_status():
     with job_lock:
@@ -550,7 +650,7 @@ def maybe_wsl_path(path):
     return path
 
 
-VIDEO_FILEFILTER = "视频文件|*.mp4 *.m4v *.webm *.mov *.mkv *.avi *.flv *.ts *.wmv *.mpg *.mpeg *.3gp *.gif"
+MEDIA_FILEFILTER = "媒体文件|*.mp4 *.m4v *.webm *.mov *.mkv *.avi *.flv *.ts *.wmv *.mpg *.mpeg *.3gp *.gif *.jpg *.jpeg *.png *.webp *.bmp"
 
 
 def _pick_tkinter():
@@ -564,9 +664,11 @@ def _pick_tkinter():
         root.withdraw()
         root.attributes("-topmost", True)
         path = filedialog.askopenfilename(
-            title="选择视频文件",
+            title="选择媒体文件",
             initialdir=last_dir["path"],
-            filetypes=[("视频文件", "*.mp4 *.m4v *.webm *.mov *.mkv *.avi *.flv *.ts *.wmv *.mpg *.mpeg *.3gp *.gif"),
+            filetypes=[("媒体文件", "*.mp4 *.m4v *.webm *.mov *.mkv *.avi *.flv *.ts *.wmv *.mpg *.mpeg *.3gp *.gif *.jpg *.jpeg *.png *.webp *.bmp"),
+                       ("视频文件", "*.mp4 *.m4v *.webm *.mov *.mkv *.avi *.flv *.ts *.wmv *.mpg *.mpeg *.3gp"),
+                       ("图片文件", "*.jpg *.jpeg *.png *.webp *.bmp"),
                        ("所有文件", "*.*")],
         )
         root.destroy()
@@ -582,7 +684,7 @@ def _pick_zenity():
     try:
         r = subprocess.run(
             [exe, "--file-selection", "--title=选择视频文件",
-             f"--file-filter={VIDEO_FILEFILTER}", "--file-filter=所有文件|*"],
+             f"--file-filter={MEDIA_FILEFILTER}", "--file-filter=所有文件|*"],
             capture_output=True, encoding="utf-8", errors="replace",
             creationflags=CREATE_NO_WINDOW, timeout=180)
     except Exception:
@@ -614,7 +716,7 @@ def api_pick():
         if status == "ok":
             info = media_info(path, with_thumb=True)
             if not info:
-                return jsonify({"error": "请选择支持的视频文件"}), 400
+                return jsonify({"error": "请选择支持的媒体文件"}), 400
             last_dir["path"] = info["dir"]
             return jsonify({"path": path, "info": info})
         if status == "cancel":
