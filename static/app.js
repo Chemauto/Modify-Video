@@ -408,47 +408,52 @@ function scrubTo(t) {
   el.tCur.textContent = fmtTime(t);
   el.ph.style.left = pct(t) + "%";
 }
-el.hA.addEventListener("pointerdown", (e) => {
-  e.stopPropagation();
-  el.hA.classList.add("dragging");
-  el.hA.setPointerCapture(e.pointerId);
-  const move = (ev) => {
-    state.selA = Math.min(tlPos(ev), state.selB - 0.05);
-    clampSel(); renderTL(); scrubTo(state.selA);
-  };
-  const up = () => {
-    el.hA.classList.remove("dragging");
-    el.hA.removeEventListener("pointermove", move);
-    el.hA.removeEventListener("pointerup", up);
-  };
-  el.hA.addEventListener("pointermove", move);
-  el.hA.addEventListener("pointerup", up);
+function startHandleDrag(handle, onMove) {
+  handle.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    handle.classList.add("dragging");
+    handle.setPointerCapture(e.pointerId);
+    const move = (ev) => {
+      // 仅按住左键时拖动；pointercancel/pointerup 兜底卸载，避免悬停误触发
+      if (!(ev.buttons & 1)) return;
+      onMove(tlPos(ev));
+    };
+    const up = () => {
+      handle.classList.remove("dragging");
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.removeEventListener("pointercancel", up);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+    handle.addEventListener("pointercancel", up);
+  });
+}
+startHandleDrag(el.hA, (t) => {
+  state.selA = Math.min(t, state.selB - 0.05);
+  clampSel(); renderTL(); scrubTo(state.selA);
 });
-el.hB.addEventListener("pointerdown", (e) => {
-  e.stopPropagation();
-  el.hB.classList.add("dragging");
-  el.hB.setPointerCapture(e.pointerId);
-  const move = (ev) => {
-    state.selB = Math.max(tlPos(ev), state.selA + 0.05);
-    clampSel(); renderTL(); scrubTo(state.selB);
-  };
-  const up = () => {
-    el.hB.classList.remove("dragging");
-    el.hB.removeEventListener("pointermove", move);
-    el.hB.removeEventListener("pointerup", up);
-  };
-  el.hB.addEventListener("pointermove", move);
-  el.hB.addEventListener("pointerup", up);
+startHandleDrag(el.hB, (t) => {
+  state.selB = Math.max(t, state.selA + 0.05);
+  clampSel(); renderTL(); scrubTo(state.selB);
 });
 el.tl.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  el.tl.setPointerCapture(e.pointerId);
   scrubTo(tlPos(e));
-  const move = (ev) => scrubTo(tlPos(ev));
+  const move = (ev) => {
+    if (!(ev.buttons & 1)) return;
+    scrubTo(tlPos(ev));
+  };
   const up = () => {
     el.tl.removeEventListener("pointermove", move);
     el.tl.removeEventListener("pointerup", up);
+    el.tl.removeEventListener("pointercancel", up);
   };
   el.tl.addEventListener("pointermove", move);
   el.tl.addEventListener("pointerup", up);
+  el.tl.addEventListener("pointercancel", up);
 });
 
 /* ---------------- 导出设置 ---------------- */
