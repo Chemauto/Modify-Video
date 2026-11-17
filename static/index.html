@@ -137,7 +137,22 @@
       <p class="hint">预览会即时变速，导出按此速度处理（含声音）</p>
     </div>
 
-    <button id="btnExport" class="btn primary big" disabled>
+      <div class="field">
+        <label>画质增强</label>
+        <div class="chips" id="enhanceChips">
+          <button data-enhance="none" class="active">不增强</button>
+          <button data-enhance="light">轻度锐化</button>
+          <button data-enhance="strong">强力锐化</button>
+        </div>
+        <p class="hint">通过锐化提升清晰度，对模糊源片效果明显；源片本身很清晰时建议关闭</p>
+      </div>
+
+      <div class="field">
+        <label>输出文件名（可选）</label>
+        <input type="text" id="outName" spellcheck="false" placeholder="留空使用默认：原文件名_edited">
+      </div>
+
+      <button id="btnExport" class="btn primary big" disabled>
       <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor"><path d="M10 2l4 4h-3v6H9V6H6l4-4zM3 12v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4h-2v4H5v-4H3z"/></svg>
       开始导出
     </button>
@@ -192,6 +207,14 @@
           <button data-fmt="webm">WebM</button>
         </div>
       </div>
+      <div class="field">
+        <label>画质增强</label>
+        <div class="chips" id="cmpEnhanceChips">
+          <button data-enhance="none" class="active">不增强</button>
+          <button data-enhance="light">轻度锐化</button>
+          <button data-enhance="strong">强力锐化</button>
+        </div>
+      </div>
     </div>
 
     <div id="imgCmpFields" hidden>
@@ -201,6 +224,14 @@
           <button data-fmt="jpg" class="active">JPG</button>
           <button data-fmt="webp">WebP</button>
           <button data-fmt="png">PNG</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>画质增强</label>
+        <div class="chips" id="imgEnhanceChips">
+          <button data-enhance="none" class="active">不增强</button>
+          <button data-enhance="light">轻度锐化</button>
+          <button data-enhance="strong">强力锐化</button>
         </div>
       </div>
       <div class="field">
@@ -218,6 +249,11 @@
         </select>
         <p class="hint">PNG 为无损压缩；转 JPG / WebP 或缩小宽度可显著减小体积</p>
       </div>
+    </div>
+
+    <div class="field">
+      <label>输出文件名（可选）</label>
+      <input type="text" id="cmpName" spellcheck="false" placeholder="留空使用默认：原文件名_compressed">
     </div>
 
     <button id="btnCompress" class="btn primary big" disabled>

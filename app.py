@@ -72,7 +72,7 @@ CONTAINER_KEYS = {
 
 
 # FFmpeg 自动下载：优先使用本项目 Releases 中的资源包，失败时回退到官方上游构建
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 RELEASE_BASE = "https://github.com/Chemauto/Modify-Video/releases/download/v1.0.1/"
 REPO_API_LATEST = "https://api.github.com/repos/Chemauto/Modify-Video/releases/latest"
 DOWNLOAD_URL_PREFIX = "https://github.com/Chemauto/Modify-Video/releases/download/"
@@ -304,13 +304,26 @@ def video_codec_args(fmt):
     return []
 
 
-def unique_output_path(src, fmt, tag="edited"):
-    stem = os.path.splitext(os.path.basename(src))[0]
+UNSHARP_FILTERS = {
+    "light": "unsharp=5:5:0.6:5:5:0.0",
+    "strong": "unsharp=5:5:1.3:5:5:0.0",
+}
+
+
+def sanitize_name(name):
+    """清理用户自定义输出文件名：去除非法字符，留空返回 None"""
+    name = re.sub(r'[\\/:*?"<>|]', "", (name or "").strip())
+    name = re.sub(r"\s+", " ", name).strip()
+    return name[:60] or None
+
+
+def unique_output_path(src, fmt, tag="edited", stem_override=None):
     directory = os.path.dirname(src)
-    candidate = os.path.join(directory, f"{stem}_{tag}.{fmt}")
+    stem = stem_override or (os.path.splitext(os.path.basename(src))[0] + f"_{tag}")
+    candidate = os.path.join(directory, f"{stem}.{fmt}")
     n = 2
     while os.path.exists(candidate):
-        candidate = os.path.join(directory, f"{stem}_{tag}_{n}.{fmt}")
+        candidate = os.path.join(directory, f"{stem}_{n}.{fmt}")
         n += 1
     return candidate
 
@@ -333,6 +346,9 @@ def build_command(cfg):
         fps = max(1, int(cfg.get("gifFps") or 12))
         width = int(cfg.get("gifWidth") or 0)
         chain = []
+        enhance = UNSHARP_FILTERS.get(cfg.get("enhance"))
+        if enhance:
+            chain.append(enhance)
         if speed != 1:
             chain.append(f"setpts=PTS/{speed:g}")
         chain.append(f"fps={fps}")
@@ -344,7 +360,8 @@ def build_command(cfg):
 
     src_keys = set((cfg.get("srcFormat") or "").split(","))
     same_container = bool(CONTAINER_KEYS.get(fmt, set()) & src_keys)
-    if speed == 1 and not mute and same_container:
+    enhance = UNSHARP_FILTERS.get(cfg.get("enhance"))
+    if speed == 1 and not mute and same_container and not enhance:
         if end is not None:
             cmd += ["-t", f"{max(0.05, end - start):.3f}"]
         cmd += ["-c", "copy", out]
@@ -354,6 +371,8 @@ def build_command(cfg):
     if speed != 1:
         vf.append(f"setpts=PTS/{speed:g}")
         af.append(atempo_chain(speed))
+    if enhance:
+        vf.append(enhance)
     if vf:
         cmd += ["-vf", ",".join(vf)]
     if mute:
@@ -503,7 +522,8 @@ def api_export():
         "mute": bool(body.get("mute")),
         "gifFps": body.get("gifFps"), "gifWidth": body.get("gifWidth"),
         "srcFormat": info["formatName"],
-        "output": unique_output_path(path, fmt),
+        "enhance": body.get("enhance") or "",
+        "output": unique_output_path(path, fmt, stem_override=sanitize_name(body.get("outputName"))),
         "total": max(0.01, total_span / speed),
     }
     with job_lock:
@@ -525,6 +545,9 @@ def build_compress_command(cfg):
         target = int(cfg.get("res") or 0)
         if target and cfg.get("height", 0) > target:
             vf.append(f"scale=-2:{target}")
+        enhance = UNSHARP_FILTERS.get(cfg.get("enhance"))
+        if enhance:
+            vf.append(enhance)
         if cfg["format"] == "webm":
             cmd += ["-c:v", "libvpx-vp9", "-crf", str(STRENGTH_VPX.get(cfg.get("strength"), 31)),
                     "-b:v", "0", "-deadline", "good", "-cpu-used", "4",
@@ -545,6 +568,9 @@ def build_compress_command(cfg):
     w = int(cfg.get("imgWidth") or 0)
     if w > 0:
         vf.append(f"scale='min(iw,{w})':-2:flags=lanczos")
+    enhance = UNSHARP_FILTERS.get(cfg.get("enhance"))
+    if enhance:
+        vf.append(enhance)
     if vf:
         cmd += ["-vf", ",".join(vf)]
     if cfg["format"] == "jpg":
@@ -581,10 +607,12 @@ def api_compress():
         return jsonify({"error": "当前 FFmpeg 缺少 WebP 编码器，请选择 JPG"}), 400
     cfg = {
         "path": path,
-        "output": unique_output_path(path, fmt, tag="compressed"),
+        "output": unique_output_path(path, fmt, tag="compressed",
+                                     stem_override=sanitize_name(body.get("outputName"))),
         "kind": "compress",
         "media_kind": kind,
         "format": fmt,
+        "enhance": body.get("enhance") or "",
         "verb": "正在压缩…",
         "total": max(0.01, info["duration"] or 1),
     }

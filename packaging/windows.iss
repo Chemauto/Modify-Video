@@ -1,5 +1,5 @@
 #define MyAppName "Modify Video"
-#define MyAppVersion "1.0.7"
+#define MyAppVersion "1.0.8"
 #define MyAppPublisher "Chemauto"
 #define MyAppURL "https://github.com/Chemauto/Modify-Video"
 

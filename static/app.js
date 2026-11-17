@@ -16,7 +16,7 @@ const el = {
   fmtSeg: $("#fmtSeg"), fmtNote: $("#fmtNote"), srcHint: $("#srcHint"),
   gifOpts: $("#gifOpts"), gifFps: $("#gifFps"), gifFpsVal: $("#gifFpsVal"), gifWidth: $("#gifWidth"),
   speed: $("#speed"), speedVal: $("#speedVal"), speedChips: $("#speedChips"),
-  btnExport: $("#btnExport"),
+  btnExport: $("#btnExport"), enhanceChips: $("#enhanceChips"), outName: $("#outName"),
   prog: $("#prog"), progBar: $("#progBar"), progText: $("#progText"), btnCancel: $("#btnCancel"),
   result: $("#result"), okLineText: $("#okLineText"), outPath: $("#outPath"),
   btnReveal: $("#btnReveal"), btnPreviewOut: $("#btnPreviewOut"), btnBackEdit: $("#btnBackEdit"),
@@ -24,6 +24,7 @@ const el = {
   tabEdit: $("#tabEdit"), tabCompress: $("#tabCompress"),
   editorExtras: $("#editorExtras"), editPanel: $("#editPanel"), compressPanel: $("#compressPanel"),
   strengthChips: $("#strengthChips"), cmpRes: $("#cmpRes"), cmpFmtSeg: $("#cmpFmtSeg"),
+  cmpEnhanceChips: $("#cmpEnhanceChips"), imgEnhanceChips: $("#imgEnhanceChips"), cmpName: $("#cmpName"),
   vidCmpFields: $("#vidCmpFields"), imgCmpFields: $("#imgCmpFields"),
   imgFmtSeg: $("#imgFmtSeg"), imgQuality: $("#imgQuality"), imgQVal: $("#imgQVal"), imgWidth: $("#imgWidth"),
   btnCompress: $("#btnCompress"),
@@ -522,6 +523,8 @@ el.btnExport.addEventListener("click", async () => {
       format: state.format,
       gifFps: parseInt(el.gifFps.value, 10),
       gifWidth: parseInt(el.gifWidth.value, 10),
+      enhance: chipValue(el.enhanceChips, "data-enhance"),
+      outputName: el.outName.value.trim(),
     });
     pollStatus();
   } catch (e) {
@@ -730,11 +733,20 @@ el.tabEdit.addEventListener("click", () => setMode("edit"));
 el.tabCompress.addEventListener("click", () => setMode("compress"));
 
 /* ---------------- 压缩流程 ---------------- */
-el.strengthChips.addEventListener("click", (e) => {
-  const b = e.target.closest("button[data-strength]");
-  if (!b) return;
-  el.strengthChips.querySelectorAll("button").forEach((x) => x.classList.toggle("active", x === b));
-});
+function bindChips(root, attr) {
+  root.addEventListener("click", (e) => {
+    const b = e.target.closest(`button[${attr}]`);
+    if (!b) return;
+    root.querySelectorAll(`button[${attr}]`).forEach((x) => x.classList.toggle("active", x === b));
+  });
+}
+function chipValue(root, attr) {
+  return root.querySelector(`button[${attr}].active`)?.dataset[attr.slice(6).replace(/-([a-z])/g, (m, c) => c.toUpperCase())];
+}
+bindChips(el.strengthChips, "data-strength");
+bindChips(el.enhanceChips, "data-enhance");
+bindChips(el.cmpEnhanceChips, "data-enhance");
+bindChips(el.imgEnhanceChips, "data-enhance");
 el.cmpFmtSeg.addEventListener("click", (e) => {
   const b = e.target.closest("button[data-fmt]");
   if (!b) return;
@@ -760,11 +772,14 @@ el.btnCompress.addEventListener("click", async () => {
     body.fmt = el.imgFmtSeg.querySelector("button.active").dataset.fmt;
     body.imgQuality = parseInt(el.imgQuality.value, 10);
     body.imgWidth = parseInt(el.imgWidth.value, 10);
+    body.enhance = chipValue(el.imgEnhanceChips, "data-enhance");
   } else {
     body.fmt = el.cmpFmtSeg.querySelector("button.active").dataset.fmt;
     body.strength = el.strengthChips.querySelector("button.active").dataset.strength;
     body.res = parseInt(el.cmpRes.value, 10);
+    body.enhance = chipValue(el.cmpEnhanceChips, "data-enhance");
   }
+  body.outputName = el.cmpName.value.trim();
   state.compressing = true;
   state.cmpOriginalSize = state.info?.size || 0;
   el.btnCompress.disabled = true;
