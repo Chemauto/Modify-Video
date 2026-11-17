@@ -97,18 +97,19 @@
   <aside class="card panel" id="editPanel">
     <h3>导出设置</h3>
 
-    <div class="field">
-      <label>输出格式</label>
-      <div class="seg" id="fmtSeg">
-        <button data-fmt="mp4" class="active">MP4</button>
-        <button data-fmt="webm">WebM</button>
-        <button data-fmt="gif">GIF</button>
-        <button data-fmt="mkv">MKV</button>
-        <button data-fmt="avi">AVI</button>
-        <button data-fmt="mov">MOV</button>
+      <div class="field">
+        <label>输出格式</label>
+        <div class="seg" id="fmtSeg">
+          <button data-fmt="mp4" class="active">MP4</button>
+          <button data-fmt="webm">WebM</button>
+          <button data-fmt="gif">GIF</button>
+          <button data-fmt="mkv">MKV</button>
+          <button data-fmt="avi">AVI</button>
+          <button data-fmt="mov">MOV</button>
+        </div>
+        <p id="srcHint" class="hint" hidden></p>
+        <p id="fmtNote" class="hint">画质与原片一致时将直接流复制，速度极快</p>
       </div>
-      <p id="fmtNote" class="hint">画质与原片一致时将直接流复制，速度极快</p>
-    </div>
 
     <div id="gifOpts" class="field" hidden>
       <label>GIF 帧率 <b id="gifFpsVal">12</b> fps</label>

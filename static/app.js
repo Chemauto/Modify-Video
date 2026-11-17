@@ -13,7 +13,7 @@ const el = {
   btnPlay: $("#btnPlay"), icPlay: $("#icPlay"), icPause: $("#icPause"), playLabel: $("#playLabel"),
   btnSetIn: $("#btnSetIn"), btnSetOut: $("#btnSetOut"), btnReset: $("#btnReset"),
   chkLoop: $("#chkLoop"), btnChange: $("#btnChange"),
-  fmtSeg: $("#fmtSeg"), fmtNote: $("#fmtNote"),
+  fmtSeg: $("#fmtSeg"), fmtNote: $("#fmtNote"), srcHint: $("#srcHint"),
   gifOpts: $("#gifOpts"), gifFps: $("#gifFps"), gifFpsVal: $("#gifFpsVal"), gifWidth: $("#gifWidth"),
   speed: $("#speed"), speedVal: $("#speedVal"), speedChips: $("#speedChips"),
   btnExport: $("#btnExport"),
@@ -143,6 +143,11 @@ function setFile(path, info, fromPreview = false) {
     `${info.name} · ${info.width || "?"}×${info.height || "?"} · ${fmtSize(info.size)}` +
     (info.kind === "image" ? " · 图片" : (info.hasAudio ? "" : " · 无音轨"));
   el.tabEdit.disabled = state.kind === "image";
+  const isGifSource = state.kind === "video" && ext === "gif";
+  el.srcHint.hidden = !isGifSource;
+  if (isGifSource) {
+    el.srcHint.textContent = "当前为 GIF：选择 MP4 / WebM 即可转换为视频，剪辑和变速同样适用";
+  }
   el.vidCmpFields.hidden = state.kind !== "video";
   el.imgCmpFields.hidden = state.kind !== "image";
   el.btnCompress.disabled = false;
@@ -592,7 +597,6 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => (
   { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const cleanNotes = (s) => String(s || "")
   .replace(/\r/g, "").replace(/^#+\s*/gm, "").replace(/\*\*/g, "").replace(/`/g, "").trim();
-const pickAsset = (assets, re) => (assets || []).find((a) => re.test(a.name));
 const fmtMB = (n) => (n / 1048576).toFixed(0) + " MB";
 
 el.btnUpdate.addEventListener("click", () => {
@@ -646,17 +650,12 @@ function renderUpdate(o = {}) {
     }
     const acts = [];
     if (d.updateAvailable) {
-      if (d.mode === "exe") {
-        const a = pickAsset(d.assets, /-setup\.exe$/);
-        if (a) acts.push(`<button id="updDl" class="btn primary" data-url="${esc(a.url)}" data-size="${a.size}">下载并运行安装程序${a.size ? `（${fmtMB(a.size)}）` : ""}</button>`);
-      } else if (d.mode === "system") {
-        const a = pickAsset(d.assets, /_all\.deb$/);
-        if (a) acts.push(`<button id="updDl" class="btn primary" data-url="${esc(a.url)}" data-size="${a.size}">下载 deb 安装包${a.size ? `（${fmtMB(a.size)}）` : ""}</button>`);
-      } else if (d.mode === "source") {
-        acts.push(`<button id="updGit" class="btn primary">通过 git 同步更新</button>`);
-      }
+      const label = d.mode === "exe" ? "一键更新（自动下载安装并重启）"
+        : d.mode === "system" ? "一键更新（自动下载安装并重启）"
+        : "一键更新（同步代码并自动重启）";
+      acts.push(`<button id="updGo" class="btn primary">${label}</button>`);
     } else if (d.mode === "source") {
-      acts.push(`<button id="updGit" class="btn">同步代码（git pull）</button>`);
+      acts.push(`<button id="updGo" class="btn">同步代码（git pull）</button>`);
     }
     if (d.url) acts.push(`<button id="updPage" class="btn ghost">打开发布页</button>`);
     html += `<div class="update-actions">${acts.join("")}</div><div id="updMsg"></div>`;
@@ -669,54 +668,42 @@ function renderUpdate(o = {}) {
   const retry = q("#updRetry");
   if (retry) retry.addEventListener("click", runCheck);
 
-  const dl = q("#updDl");
-  if (dl) dl.addEventListener("click", async () => {
+  const go = q("#updGo");
+  if (go) go.addEventListener("click", async () => {
     if (UP.busy) return;
     UP.busy = true;
-    dl.disabled = true;
-    const size = dl.dataset.size;
-    dl.textContent = `正在下载…（${fmtMB(size)}，请稍候）`;
+    go.disabled = true;
+    go.textContent = "正在下载并安装…（请保持网络畅通，可能需要几分钟）";
     const msg = q("#updMsg");
     try {
-      const j = await postJSON("/api/update/download", { url: dl.dataset.url });
+      const j = await postJSON("/api/update/install");
       UP.busy = false;
-      if (j.launched) {
-        toast("安装程序已启动，请按提示完成更新（应用会自动重启）");
-        UP.open = false;
-        el.updatePanel.hidden = true;
-      } else {
-        msg.innerHTML = `<div class="update-cmd"><span>sudo apt install -y &quot;${esc(j.path)}&quot;</span>
+      if (j.ok) {
+        msg.innerHTML = `<p class="hint">${esc(j.message)}</p>`;
+        go.textContent = j.stage === "installing" ? "安装中，完成后将自动重启…" : "即将自动重启…";
+        toast(j.message);
+      } else if (j.needsManual) {
+        msg.innerHTML = `<div class="update-cmd"><span></span>
           <button id="updCopy" class="btn">复制命令</button></div>
-          <p class="hint">安装包已下载，执行上方命令完成升级</p>`;
+          <p class="hint">${esc(j.message)}</p>`;
+        const span = msg.querySelector(".update-cmd span");
+        if (span) span.textContent = j.command;
         const cp = q("#updCopy");
         if (cp) cp.addEventListener("click", () => {
-          navigator.clipboard.writeText(`sudo apt install -y "${j.path}"`).then(() => toast("已复制"));
+          navigator.clipboard.writeText(j.command).then(() => toast("已复制"));
         });
+        go.disabled = false;
+        go.textContent = "一键更新";
+      } else {
+        msg.innerHTML = `<p class="hint">${esc(j.message || "无需更新")}</p>`;
+        go.disabled = false;
+        go.textContent = "一键更新";
       }
     } catch (e) {
       UP.busy = false;
-      dl.disabled = false;
       msg.innerHTML = `<p class="hint">${esc(e.message)}</p>`;
-    }
-  });
-
-  const git = q("#updGit");
-  if (git) git.addEventListener("click", async () => {
-    if (UP.busy) return;
-    UP.busy = true;
-    git.disabled = true;
-    git.textContent = "正在同步…";
-    const msg = q("#updMsg");
-    try {
-      const j = await postJSON("/api/update/gitpull");
-      UP.busy = false;
-      msg.innerHTML = `<p class="hint">${esc(j.output || (j.ok ? "已同步到最新代码" : "同步失败"))}${j.ok ? "，请重启应用生效" : ""}</p>`;
-      if (j.ok) toast("代码已同步，重启应用后生效");
-    } catch (e) {
-      UP.busy = false;
-      msg.innerHTML = `<p class="hint">${esc(e.message)}</p>`;
-      git.disabled = false;
-      git.textContent = "通过 git 同步更新";
+      go.disabled = false;
+      go.textContent = "一键更新";
     }
   });
 

@@ -72,7 +72,7 @@ CONTAINER_KEYS = {
 
 
 # FFmpeg 自动下载：优先使用本项目 Releases 中的资源包，失败时回退到官方上游构建
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 RELEASE_BASE = "https://github.com/Chemauto/Modify-Video/releases/download/v1.0.1/"
 REPO_API_LATEST = "https://api.github.com/repos/Chemauto/Modify-Video/releases/latest"
 DOWNLOAD_URL_PREFIX = "https://github.com/Chemauto/Modify-Video/releases/download/"
@@ -753,9 +753,8 @@ def update_mode():
     return "system"
 
 
-@app.get("/api/update/check")
-def api_update_check():
-    tag = notes = page_url = ""
+def query_latest_release():
+    """查询 GitHub 最新版本；API 限流时回退到 releases/latest 重定向解析"""
     try:
         req = urllib.request.Request(REPO_API_LATEST, headers={
             "User-Agent": "ModifyVideo/" + APP_VERSION,
@@ -768,15 +767,14 @@ def api_update_check():
         page_url = data.get("html_url", "")
         assets = [{"name": a.get("name", ""), "url": a.get("browser_download_url", ""), "size": a.get("size", 0)}
                   for a in data.get("assets", [])]
+        return tag, notes, page_url, assets
     except Exception:
-        # GitHub API 限流时回退：从 releases/latest 的重定向地址解析版本号
         try:
             req = urllib.request.Request("https://github.com/Chemauto/Modify-Video/releases/latest",
                                          headers={"User-Agent": "ModifyVideo/" + APP_VERSION})
             with urllib.request.urlopen(req, timeout=10) as r:
                 m = re.search(r"/releases/tag/(v[\d.]+)", r.geturl())
             tag = m.group(1) if m else ""
-            notes = ""
             page_url = f"https://github.com/Chemauto/Modify-Video/releases/tag/{tag}" if tag else ""
             v = tag.lstrip("v")
             assets = [
@@ -785,8 +783,74 @@ def api_update_check():
                 {"name": f"modify-video_{v}_all.deb",
                  "url": f"{DOWNLOAD_URL_PREFIX}{tag}/modify-video_{v}_all.deb", "size": 0},
             ] if tag else []
+            return tag, "", page_url, assets
         except Exception as e2:
-            return jsonify({"error": f"无法连接 GitHub：{e2}"}), 502
+            raise RuntimeError(f"无法连接 GitHub：{e2}")
+
+
+def pick_update_asset(assets):
+    pattern = r"-setup\.exe$" if os.name == "nt" else r"_all\.deb$"
+    for a in assets:
+        if re.search(pattern, a.get("name", "")):
+            return a
+    return None
+
+
+def downloads_dir():
+    d = os.path.join(os.path.expanduser("~"), "Downloads")
+    return d if os.path.isdir(d) else os.path.expanduser("~")
+
+
+def schedule_restart(delay=1.5):
+    """延迟后以独立进程重启应用（deb / 源码方式）；Windows 安装器负责自身重启"""
+    def _do():
+        if os.name == "posix":
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable]
+            elif shutil.which("modify-video"):
+                cmd = ["modify-video"]
+            else:
+                cmd = [sys.executable, os.path.join(BASE_DIR, "app.py")]
+            subprocess.Popen(["setsid"] + cmd, start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             stdin=subprocess.DEVNULL)
+        else:
+            subprocess.Popen([sys.executable, os.path.join(BASE_DIR, "app.py")],
+                             creationflags=CREATE_NO_WINDOW)
+        os._exit(0)
+    threading.Timer(delay, _do).start()
+
+
+def install_deb_linux(deb_path):
+    """静默安装 deb：WSL 走 wsl -u root，桌面走 pkexec / sudo -n；返回 (是否成功, 说明)"""
+    install_cmd = f"DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall '{deb_path}'"
+    attempts = []
+    if is_wsl() and shutil.which("wsl.exe"):
+        attempts.append(["wsl.exe", "-u", "root", "--", "bash", "-c", install_cmd])
+    if shutil.which("pkexec"):
+        attempts.append(["pkexec", "bash", "-c", install_cmd])
+    if shutil.which("sudo"):
+        attempts.append(["sudo", "-n", "bash", "-c", install_cmd])
+    last_err = "系统缺少可用的提权组件（pkexec）"
+    for cmd in attempts:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
+                               timeout=300, creationflags=CREATE_NO_WINDOW)
+            if r.returncode == 0:
+                return True, "installed"
+            last_err = ((r.stderr or "") + (r.stdout or "")).strip().splitlines()
+            last_err = last_err[-1][:200] if last_err else f"退出码 {r.returncode}"
+        except Exception as e:
+            last_err = str(e)[:200]
+    return False, last_err
+
+
+@app.get("/api/update/check")
+def api_update_check():
+    try:
+        tag, notes, page_url, assets = query_latest_release()
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 502
     latest, current = parse_ver(tag), parse_ver(APP_VERSION)
     return jsonify({
         "current": APP_VERSION,
@@ -799,50 +863,63 @@ def api_update_check():
     })
 
 
-def downloads_dir():
-    d = os.path.join(os.path.expanduser("~"), "Downloads")
-    return d if os.path.isdir(d) else os.path.expanduser("~")
-
-
-@app.post("/api/update/download")
-def api_update_download():
-    body = request.get_json(silent=True) or {}
-    url = (body.get("url") or "").strip()
-    if not url.startswith(DOWNLOAD_URL_PREFIX):
-        return jsonify({"error": "非法的下载地址"}), 400
-    name = os.path.basename(url.split("?")[0])
-    if not (name.endswith(".exe") or name.endswith(".deb")):
-        return jsonify({"error": "没有适配当前系统的安装包"}), 400
-    dest = os.path.join(downloads_dir(), name)
+@app.post("/api/update/install")
+def api_update_install():
+    """一键更新：自动下载 → 自动安装 → 自动重启，全程无需手动操作"""
+    mode = update_mode()
     try:
-        download_with_progress(url, dest)
+        tag, notes, page_url, assets = query_latest_release()
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 502
+    latest, current = parse_ver(tag), parse_ver(APP_VERSION)
+    if not (latest and current and latest > current):
+        return jsonify({"ok": False, "message": f"已是最新版本 v{APP_VERSION}"})
+
+    asset = pick_update_asset(assets)
+    if not asset:
+        return jsonify({"error": "最新版本缺少适配当前系统的安装包"}), 404
+
+    if mode == "source":
+        try:
+            r = subprocess.run(["git", "-C", BASE_DIR, "pull", "--ff-only"],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=300)
+            if r.returncode != 0:
+                out = ((r.stdout or "") + (r.stderr or "")).strip().splitlines()
+                detail = out[-1][:200] if out else f"退出码 {r.returncode}"
+                return jsonify({"error": f"git 同步失败：{detail}"}), 500
+        except FileNotFoundError:
+            return jsonify({"error": "未安装 git，无法同步更新"}), 400
+        except Exception as e:
+            return jsonify({"error": f"git 同步失败：{e}"}), 500
+        schedule_restart()
+        return jsonify({"ok": True, "stage": "restarting",
+                        "message": "代码已同步，应用即将自动重启"})
+
+    dest = os.path.join(downloads_dir(), asset["name"])
+    try:
+        download_with_progress(asset["url"], dest)
     except Exception as e:
         return jsonify({"error": f"下载失败：{e}"}), 502
-    result = {"ok": True, "path": dest, "launched": False}
-    if name.endswith(".exe") and os.name == "nt":
+
+    if mode == "exe":
         try:
-            subprocess.Popen([dest, "/closeapplications", "/restartexitapplication"],
+            subprocess.Popen([dest, "/SILENT", "/SUPPRESSMSGBOXES",
+                              "/CLOSEAPPLICATIONS", "/RESTARTEXITAPPLICATION"],
                              creationflags=CREATE_NO_WINDOW, detached_process=True)
-            result["launched"] = True
-        except Exception:
-            result["hint"] = f"自动运行失败，请手动执行：{dest}"
-    return jsonify(result)
+        except Exception as e:
+            return jsonify({"error": f"安装程序启动失败：{e}，可手动运行 {dest}"}), 500
+        return jsonify({"ok": True, "stage": "installing",
+                        "message": "安装程序已启动，应用将自动关闭并重启"})
 
-
-@app.post("/api/update/gitpull")
-def api_update_gitpull():
-    if update_mode() != "source":
-        return jsonify({"error": "当前不是源码方式运行"}), 400
-    try:
-        r = subprocess.run(["git", "-C", BASE_DIR, "pull", "--ff-only"],
-                           capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=180)
-        out = ((r.stdout or "") + (r.stderr or "")).strip()
-        return jsonify({"ok": r.returncode == 0, "output": out[-1200:] or f"退出码 {r.returncode}"})
-    except FileNotFoundError:
-        return jsonify({"error": "未安装 git，无法同步更新"}), 400
-    except Exception as e:
-        return jsonify({"error": f"更新失败：{e}"}), 500
+    ok, detail = install_deb_linux(dest)
+    if not ok:
+        return jsonify({"ok": False, "needsManual": True,
+                        "command": f"sudo apt install -y --reinstall \"{dest}\"",
+                        "message": f"自动安装失败：{detail}。可复制命令手动执行"})
+    schedule_restart()
+    return jsonify({"ok": True, "stage": "restarting",
+                    "message": "安装完成，应用即将自动重启并打开新版本"})
 
 
 @app.post("/api/reveal")
